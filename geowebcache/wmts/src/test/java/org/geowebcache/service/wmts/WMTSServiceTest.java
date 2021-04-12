@@ -1557,10 +1557,20 @@ public class WMTSServiceTest {
                 "1",
                 xpath.evaluate(
                         "count(//wmts:Contents/wmts:Layer/wmts:ResourceURL[@resourceType='TileJSON']"
-                                + "[@format='json']"
+                                + "[@format='image/png']"
                                 + "[@template='http://localhost:8080/geowebcache"
                                 + WMTSService.REST_PATH
-                                + "/mockLayer/{style}/tilejson?format=json'])",
+                                + "/mockLayer/{style}/tilejson?format=image/png'])",
+                        doc));
+
+        assertEquals(
+                "1",
+                xpath.evaluate(
+                        "count(//wmts:Contents/wmts:Layer/wmts:ResourceURL[@resourceType='TileJSON']"
+                                + "[@format='image/jpeg']"
+                                + "[@template='http://localhost:8080/geowebcache"
+                                + WMTSService.REST_PATH
+                                + "/mockLayer/{style}/tilejson?format=image/jpeg'])",
                         doc));
     }
 }

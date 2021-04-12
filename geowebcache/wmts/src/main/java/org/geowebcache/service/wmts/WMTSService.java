@@ -347,6 +347,8 @@ public class WMTSService extends Service {
             return tile;
         } else if (req.equals(GET_TILEJSON)) {
             ConveyorTile tile = new ConveyorTile(sb, values.get("layer"), request, response);
+            String format = values.get("format");
+            tile.setMimeType(MimeType.createFromFormat(format));
             String hint = req;
             // I Will need the style when setting up the TileJSON tiles url
             String style = values.get("style");

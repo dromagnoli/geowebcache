@@ -750,10 +750,11 @@ public class WMTSGetCapabilities {
         }
         if (layer instanceof TileJSONProvider) {
             TileJSONProvider provider = (TileJSONProvider) layer;
-            String format = "json";
             if (provider.supportsTileJSON()) {
-                String template = baseTemplate + "/{style}/tilejson?format=" + format;
-                layerResourceUrlsGen(xml, format, "TileJSON", template);
+                for (String format : mimeFormats) {
+                    String template = baseTemplate + "/{style}/tilejson?format=" + format;
+                    layerResourceUrlsGen(xml, format, "TileJSON", template);
+                }
             }
         }
     }
