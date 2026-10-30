@@ -28,6 +28,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -73,6 +74,8 @@ import org.geowebcache.grid.SRS;
 import org.geowebcache.layer.TileLayer;
 import org.geowebcache.layer.wms.WMSLayer;
 import org.geowebcache.storage.UnsuitableStorageException;
+import org.geowebcache.storage.tilecache.HeapTileCacheBackendInfo;
+import org.geowebcache.storage.tilecache.TileCacheInfo;
 import org.geowebcache.util.TestUtils;
 import org.junit.Assume;
 import org.junit.Before;
@@ -792,5 +795,60 @@ public class XMLConfigurationTest {
         } finally {
             roEmptyDir.setWritable(true);
         }
+    }
+
+    @Test
+    public void testTileCacheAbsentByDefault() {
+        assertNull(config.getTileCache());
+        WMSLayer layer = (WMSLayer)
+                config.getLayer(config.getLayerNames().iterator().next()).get();
+        assertFalse(layer.isMemoryCached());
+    }
+
+    @Test
+    public void testSaveTileCache() throws Exception {
+        HeapTileCacheBackendInfo heap = new HeapTileCacheBackendInfo();
+        heap.setMaxSizeMB(128);
+        TileCacheInfo tileCache = new TileCacheInfo();
+        tileCache.setEnabled(true);
+        tileCache.setTimeToLive(120);
+        tileCache.setPassthrough(false);
+        tileCache.setStatsInterval(60);
+        tileCache.setBackend(heap);
+
+        config.setTileCache(tileCache);
+
+        assertValidAgainstSchema();
+        TileCacheInfo reloaded = reload().getTileCache();
+        assertTrue(reloaded.isEnabled());
+        assertEquals(120, reloaded.getTimeToLive());
+        assertFalse(reloaded.isPassthrough());
+        assertEquals(60, reloaded.getStatsInterval());
+        assertEquals(128, ((HeapTileCacheBackendInfo) reloaded.getBackend()).getMaxSizeMB());
+    }
+
+    @Test
+    public void testSaveMemoryCachedLayer() throws Exception {
+        String name = config.getLayerNames().iterator().next();
+        WMSLayer layer = (WMSLayer) config.getLayer(name).get();
+        layer.setMemoryCached(true);
+
+        config.modifyLayer(layer);
+
+        assertValidAgainstSchema();
+        assertTrue(reload().getLayer(name).get().isMemoryCached());
+    }
+
+    private void assertValidAgainstSchema() throws Exception {
+        try (InputStream in = new FileInputStream(configFile)) {
+            XMLConfiguration.validate(XMLConfiguration.loadDocument(in));
+        }
+    }
+
+    private XMLConfiguration reload() throws Exception {
+        XMLConfiguration reloaded = new XMLConfiguration(null, configDir.getAbsolutePath());
+        reloaded.setGridSetBroker(gridSetBroker);
+        reloaded.afterPropertiesSet();
+        return reloaded;
     }
 }

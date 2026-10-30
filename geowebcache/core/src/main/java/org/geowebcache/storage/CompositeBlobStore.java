@@ -39,6 +39,8 @@ import org.geowebcache.layer.TileLayer;
 import org.geowebcache.layer.TileLayerDispatcher;
 import org.geowebcache.locks.LockProvider;
 import org.geowebcache.storage.blobstore.file.FileBlobStore;
+import org.geowebcache.storage.tilecache.TileCache;
+import org.geowebcache.storage.tilecache.TileCacheInfo;
 
 /**
  * A composite {@link BlobStore} that multiplexes tile operations to configured blobstores based on
@@ -77,6 +79,10 @@ public class CompositeBlobStore implements BlobStore, BlobStoreConfigurationList
     private final ReadWriteLock configLock = new ReentrantReadWriteLock();
 
     private final BlobStoreListenerList listeners = new BlobStoreListenerList();
+
+    private final ServerConfiguration serverConfiguration;
+
+    private volatile TileCache tileCache;
 
     @VisibleForTesting
     static final class LiveStore {
@@ -137,6 +143,7 @@ public class CompositeBlobStore implements BlobStore, BlobStoreConfigurationList
         this.layers = layers;
         this.defaultStorageFinder = defaultStorageFinder;
         this.lockProvider = serverConfiguration.getLockProvider();
+        this.serverConfiguration = serverConfiguration;
         this.blobStoreConfigs = blobStoreAggregator;
         StoreSuitabilityCheck oldCheck = storeSuitability.get();
         // Disable suitability checks when loading during startup.
@@ -188,6 +195,7 @@ public class CompositeBlobStore implements BlobStore, BlobStoreConfigurationList
     @Override
     public synchronized void destroy() {
         destroy(blobStores);
+        if (tileCache != null) tileCache.close();
     }
 
     private void destroy(Map<String, LiveStore> blobStores) {
@@ -267,9 +275,11 @@ public class CompositeBlobStore implements BlobStore, BlobStoreConfigurationList
 
     private BlobStore store(String layerId) throws StorageException {
 
+        TileLayer layer;
         LiveStore store;
         try {
-            store = forLayer(layerId);
+            layer = layers.getTileLayer(layerId);
+            store = forLayer(layer);
         } catch (GeoWebCacheException e) {
             throw new StorageException(e.getMessage(), e);
         }
@@ -277,20 +287,26 @@ public class CompositeBlobStore implements BlobStore, BlobStoreConfigurationList
             throw new StorageException("Attempted to use a blob store that's disabled: " + store.config.getName());
         }
 
-        return store.liveInstance;
+        return tileCache().wrap(layer, store.liveInstance);
     }
 
-    /**
-     * @throws StorageException if the blobstore is not enabled or does not exist
-     * @throws GeoWebCacheException if the layer is not found
-     */
-    private LiveStore forLayer(String layerName) throws StorageException, GeoWebCacheException {
-        TileLayer layer;
-        try {
-            layer = layers.getTileLayer(layerName);
-        } catch (GeoWebCacheException e) {
-            throw e;
+    /** The cache for the current settings, rebuilt when they are replaced, closing the previous one. */
+    private TileCache tileCache() {
+        // settings are replaced as a whole on save and reload, so identity tells a change
+        TileCacheInfo info = serverConfiguration.getTileCache();
+        TileCache cache = tileCache;
+        if (cache != null && cache.getInfo() == info) return cache;
+        synchronized (this) {
+            cache = tileCache;
+            if (cache != null && cache.getInfo() == info) return cache;
+            tileCache = new TileCache(info, layers);
+            if (cache != null) cache.close();
+            return tileCache;
         }
+    }
+
+    /** @throws StorageException if the blobstore is not enabled or does not exist */
+    private LiveStore forLayer(TileLayer layer) throws StorageException {
         String storeId = layer.getBlobStoreId();
         LiveStore store;
         if (null == storeId) {
