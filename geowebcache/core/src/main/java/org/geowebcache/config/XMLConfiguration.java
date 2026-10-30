@@ -91,6 +91,8 @@ import org.geowebcache.seed.TruncateAllRequest;
 import org.geowebcache.seed.TruncateLayerRequest;
 import org.geowebcache.storage.DefaultStorageFinder;
 import org.geowebcache.storage.UnsuitableStorageException;
+import org.geowebcache.storage.tilecache.HeapTileCacheBackendInfo;
+import org.geowebcache.storage.tilecache.TileCacheInfo;
 import org.geowebcache.util.ApplicationContextProvider;
 import org.geowebcache.util.ExceptionUtils;
 import org.geowebcache.util.URLs;
@@ -382,6 +384,7 @@ public class XMLConfiguration
 
         xs.alias("blobStores", new ArrayList<BlobStoreInfo>().getClass());
         xs.alias("FileBlobStore", FileBlobStoreInfo.class);
+        xs.alias("heapTileCache", HeapTileCacheBackendInfo.class);
         xs.aliasAttribute(BlobStoreInfo.class, "_default", "default");
         // Alias added to retain XML backwards-compatibility.
         // TODO: Would be nice to be able to use name for consistency
@@ -1257,6 +1260,17 @@ public class XMLConfiguration
     @Override
     public void setLockProvider(LockProvider lockProvider) throws IOException {
         getGwcConfig().setLockProvider(lockProvider);
+        save();
+    }
+
+    @Override
+    public TileCacheInfo getTileCache() {
+        return getGwcConfig().getTileCache();
+    }
+
+    /** Saves the tile cache settings; pass a new instance, the cache is rebuilt only when the instance changes. */
+    public void setTileCache(TileCacheInfo tileCache) throws IOException {
+        getGwcConfig().setTileCache(tileCache);
         save();
     }
 
