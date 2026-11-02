@@ -18,6 +18,7 @@ import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -243,15 +244,19 @@ public class CompositeBlobStore implements BlobStore, BlobStoreConfigurationList
     @Override
     public boolean rename(String oldLayerName, String newLayerName) throws StorageException {
         return readFunctionUnsafe(() -> {
+            boolean renamed = false;
             for (LiveStore bs : blobStores.values()) {
                 BlobStoreInfo config = bs.config;
                 if (config.isEnabled()) {
                     if (bs.liveInstance.rename(oldLayerName, newLayerName)) {
-                        return true;
+                        renamed = true;
+                        break;
                     }
                 }
             }
-            return false;
+            // even when no store had tiles, as with passthrough off they are all in the cache
+            tileCache().layerRenamed(oldLayerName, newLayerName);
+            return renamed;
         });
     }
 
@@ -290,17 +295,18 @@ public class CompositeBlobStore implements BlobStore, BlobStoreConfigurationList
         return tileCache().wrap(layer, store.liveInstance);
     }
 
-    /** The cache for the current settings, rebuilt when they are replaced, closing the previous one. */
+    /** The cache for the current settings, rebuilt when they change, closing the previous one. */
     private TileCache tileCache() {
-        // settings are replaced as a whole on save and reload, so identity tells a change
+        // a reload replaces the settings with equal ones, which must keep the cached tiles and the connection;
+        // Objects.equals checks identity first, so the per-request check stays cheap
         TileCacheInfo info = serverConfiguration.getTileCache();
         TileCache cache = tileCache;
-        if (cache != null && cache.getInfo() == info) return cache;
+        if (cache != null && Objects.equals(cache.getInfo(), info)) return cache;
         synchronized (this) {
-            cache = tileCache;
-            if (cache != null && cache.getInfo() == info) return cache;
+            TileCache previous = tileCache;
+            if (previous != null && Objects.equals(previous.getInfo(), info)) return previous;
             tileCache = new TileCache(info, layers);
-            if (cache != null) cache.close();
+            if (previous != null) previous.close();
             return tileCache;
         }
     }

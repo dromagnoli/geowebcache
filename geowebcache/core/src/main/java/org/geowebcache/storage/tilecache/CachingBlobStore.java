@@ -13,6 +13,7 @@
  */
 package org.geowebcache.storage.tilecache;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.geowebcache.storage.tilecache.TileCacheStats.Result.ERROR;
 import static org.geowebcache.storage.tilecache.TileCacheStats.Result.EXPIRED;
@@ -24,6 +25,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
@@ -31,6 +33,7 @@ import java.util.Set;
 import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.stream.IntStream;
 import org.geotools.util.logging.Logging;
 import org.geowebcache.io.ByteArrayResource;
 import org.geowebcache.io.Resource;
@@ -48,8 +51,8 @@ import org.geowebcache.util.TMSKeyBuilder;
  * Puts a {@link TileCache} in front of the layer blob store, which still keeps the layer metadata and parameter
  * mappings.
  *
- * A failing cache read is a miss and a failing cache write is dropped. A truncate that succeeds on the store behind
- * but fails on the cache clears the whole cache and throws, as tiles may be stale until their time to live ends.
+ * <p>Cache failures never fail a tile request: a failed read is a miss, a failed write is dropped. A truncate failing
+ * on the cache clears the layer tiles, or the whole cache if that fails too, then throws.
  */
 class CachingBlobStore implements BlobStore {
 
@@ -71,21 +74,32 @@ class CachingBlobStore implements BlobStore {
 
     private final TileLayer layer;
 
+    /** Whether the layer's tiles go through the cache, false when only its bulk truncates do. */
+    private final boolean cached;
+
+    /** Null when not {@link #cached}. */
     private final LayerStats stats;
 
     /** Every tile operation must target {@code layer}. */
-    CachingBlobStore(BlobStore delegate, TileCache cache, TileLayer layer) {
+    CachingBlobStore(BlobStore delegate, TileCache cache, TileLayer layer, boolean cached) {
         this.delegate = delegate;
         this.cache = cache;
         this.keys = cache.getKeys();
         this.layer = layer;
-        this.stats = cache.getStats().forLayer(layer.getName());
+        this.cached = cached;
+        this.stats = cached ? cache.getStats().forLayer(layer.getName()) : null;
+    }
+
+    /** True when the store behind holds the tiles: passthrough on, or a layer not using the cache. */
+    private boolean storeHoldsTiles() {
+        return cache.isPassthrough() || !cached;
     }
 
     @Override
     public boolean get(TileObject obj) throws StorageException {
+        if (!cached) return delegate.get(obj);
         long start = System.nanoTime();
-        String key = keys.forTile(obj);
+        String key = keys.forTile(obj, layer.getId());
         Result result = decode(obj, cacheGet(key));
         boolean found = result == HIT || result == EXPIRED;
         if (!found && cache.isPassthrough() && delegate.get(obj)) {
@@ -103,10 +117,13 @@ class CachingBlobStore implements BlobStore {
     /** Fills {@code obj} from a cache value, which is null on a miss and {@link #FAILED} when the read failed. */
     private Result decode(TileObject obj, byte[] value) {
         if (value == FAILED) return ERROR;
-        if (value == null || value[0] != FORMAT_VERSION) return MISS;
+        if (value == null || value.length < HEADER_SIZE || value[0] != FORMAT_VERSION) return MISS;
         long created = ByteBuffer.wrap(value, 1, Long.BYTES).getLong();
         obj.setCreated(created);
-        obj.setBlob(new ByteArrayResource(Arrays.copyOfRange(value, HEADER_SIZE, value.length)));
+        int length = value.length - HEADER_SIZE;
+        // the offset constructor rejects an empty tile
+        obj.setBlob(
+                length > 0 ? new ByteArrayResource(value, HEADER_SIZE, length) : new ByteArrayResource(new byte[0]));
         // the time to live already ends there, unless the writing node's clock is behind this one
         int expireCache = expireCache(obj);
         return expireCache > 0 && System.currentTimeMillis() - created > expireCache * 1000L ? EXPIRED : HIT;
@@ -116,7 +133,7 @@ class CachingBlobStore implements BlobStore {
         long[] xyz = obj.getXYZ();
         LOGGER.fine(() -> String.format(
                 Locale.ROOT,
-                "Tile cache %s for layer %s, gridset %s, z/x/y %d/%d/%d in %.2f ms",
+                "In-memory tile cache %s for layer %s, gridset %s, z/x/y %d/%d/%d in %.2f ms",
                 result.name().toLowerCase(Locale.ROOT),
                 obj.getLayerName(),
                 obj.getGridSetId(),
@@ -128,46 +145,78 @@ class CachingBlobStore implements BlobStore {
 
     @Override
     public void put(TileObject obj) throws StorageException {
+        if (!cached) {
+            delegate.put(obj);
+            return;
+        }
         // first, as building the key also sets the parameters id the mapping write needs
-        String key = keys.forTile(obj);
+        String key = keys.forTile(obj, layer.getId());
         if (cache.isPassthrough()) {
             delegate.put(obj);
         } else {
-            putParametersMetadataOnce(obj);
+            putParametersMetadataOnce(obj, key);
         }
         cachePut(key, obj, System.currentTimeMillis());
         cache.getStats().report();
     }
 
-    /** Writes the mapping the store behind would record on put, skipping the remote write when already done. */
-    private void putParametersMetadataOnce(TileObject obj) throws StorageException {
+    /**
+     * Writes the mapping the store behind would record on put, unless the cache holds a marker saying it is there.
+     * Never throws: a failed write is retried by the next put of the parameter set.
+     */
+    private void putParametersMetadataOnce(TileObject obj, String tileKey) {
         String parametersId = obj.getParametersId();
         if (parametersId == null) return;
-        String key = mappingKey(parametersId);
-        // claim before writing: the tiles of a metatile are saved in parallel, and concurrent writers of one file make
-        // it briefly disappear on Windows, where a rename deletes the target first
-        if (!cache.getWrittenMappings().add(key)) return;
+        // shared by every node: a truncate removing the mapping from the store removes the marker with the tiles
+        String marker = markerKey(tileKey, parametersId);
+        byte[] storeId = String.valueOf(layer.getBlobStoreId()).getBytes(UTF_8);
+        String claim = layer.getId() + "/" + parametersId;
+        // one check at a time: the tiles of a metatile are saved in parallel, and concurrent writers of one file make
+        // it briefly disappear on Windows, where a rename deletes the target first; the marker is written before the
+        // claim is released, so the next claimer sees it
+        if (!cache.getMappingsInFlight().add(claim)) return;
         try {
+            byte[] written = cacheGet(marker);
+            // with the cache down the tile is not cached either, so it needs no mapping
+            if (written == FAILED || Arrays.equals(written, storeId)) return;
             delegate.putParametersMetadata(obj.getLayerName(), parametersId, obj.getParameters());
+            cacheWrite(marker, storeId, cache.getTtlSeconds());
+            if (cache.getMappingWritesFailing().compareAndSet(true, false)) {
+                LOGGER.severe("In-memory tile cache records parameter mappings in the blob stores again");
+            }
         } catch (StorageException | RuntimeException e) {
-            // let the next put try again
-            cache.getWrittenMappings().remove(key);
-            throw e;
+            // the tile is cached anyway: failing the put would render every request while the store is down
+            if (cache.getMappingWritesFailing().compareAndSet(false, true)) {
+                // SEVERE as the outage lines, production logging keeps org.geowebcache at error
+                String message = "In-memory tile cache could not record parameters " + parametersId + " of layer "
+                        + obj.getLayerName() + " in its blob store, retrying on the next tiles: until then truncates"
+                        + " by parameters or bounding box miss the tiles cached meanwhile";
+                LOGGER.log(Level.SEVERE, message, e);
+            }
+        } finally {
+            cache.getMappingsInFlight().remove(claim);
         }
     }
 
-    // layer id, as a rename keeps the mapping
-    private String mappingKey(String parametersId) {
-        return layer.getId() + "/" + parametersId;
+    /**
+     * The marker of a parameter set mapping, {@code <layer>/<gridset>/<format>/<parameters>/mapping}: under the
+     * prefixes of layer, gridset and parameters truncates, outside those of the zoom levels a bounding box truncate
+     * removes.
+     */
+    private static String markerKey(String tileKey, String parametersId) {
+        String segment = "/" + parametersId + "/";
+        return tileKey.substring(0, tileKey.indexOf(segment) + segment.length()) + "mapping";
     }
 
     private byte[] cacheGet(String key) {
+        if (!cache.available()) return FAILED;
+        long start = cache.now();
         try {
             byte[] value = cache.getStore().get(key);
-            cache.succeeded();
+            cache.succeeded(start);
             return value;
         } catch (RuntimeException e) {
-            cache.failed(e);
+            cache.failed(start, e);
             return FAILED;
         }
     }
@@ -176,6 +225,10 @@ class CachingBlobStore implements BlobStore {
         long ttl = ttlSeconds(obj, created);
         // a tile read through from the store can be already past the layer's expire server cache
         if (ttl <= 0) return;
+        if (!cache.available()) {
+            stats.failedPut();
+            return;
+        }
         byte[] value;
         try {
             value = encode(obj.getBlob(), created);
@@ -185,12 +238,19 @@ class CachingBlobStore implements BlobStore {
             stats.failedPut();
             return;
         }
+        if (!cacheWrite(key, value, ttl)) stats.failedPut();
+    }
+
+    /** Writes a value, returning false when the cache failed. */
+    private boolean cacheWrite(String key, byte[] value, long ttl) {
+        long start = cache.now();
         try {
             cache.getStore().put(key, value, ttl);
-            cache.succeeded();
+            cache.succeeded(start);
+            return true;
         } catch (RuntimeException e) {
-            cache.failed(e);
-            stats.failedPut();
+            cache.failed(start, e);
+            return false;
         }
     }
 
@@ -207,14 +267,14 @@ class CachingBlobStore implements BlobStore {
     }
 
     /**
-     * The global time to live, cut to what is left of the layer's expire server cache since {@code created}, as tiles
-     * past it are rendered again and only hold memory. Zero or negative when nothing is left.
+     * What is left of the layer's expire server cache since {@code created}, or the global time to live when the layer
+     * sets none. Zero or negative when nothing is left.
      */
     private long ttlSeconds(TileObject obj, long created) {
         int expireCache = expireCache(obj);
         if (expireCache <= 0) return cache.getTtlSeconds();
-        long left = expireCache - MILLISECONDS.toSeconds(System.currentTimeMillis() - created);
-        return Math.min(cache.getTtlSeconds(), left);
+        // not capped by the global time to live: a tile evicted before its expiry would only be rendered again
+        return expireCache - MILLISECONDS.toSeconds(System.currentTimeMillis() - created);
     }
 
     /** The layer's expire server cache in seconds at the tile's zoom level, positive only when the layer sets one. */
@@ -226,97 +286,127 @@ class CachingBlobStore implements BlobStore {
     @Override
     public boolean delete(String layerName) throws StorageException {
         String prefix = keys.forLayer(layerName);
-        try {
-            return truncate(store -> store.removeByPrefix(prefix), () -> delegate.delete(layerName));
-        } finally {
-            // the store may have dropped the mappings even when the truncate failed
-            cache.getWrittenMappings().removeIf(key -> key.startsWith(mappingKey("")));
-        }
+        return truncate(store -> store.removeByPrefix(prefix), () -> delegate.delete(layerName));
     }
 
     @Override
     public boolean deleteByGridsetId(String layerName, String gridSetId) throws StorageException {
         String prefix = keys.forGridset(layerName, gridSetId);
-        return truncate(store -> store.removeByPrefix(prefix), () -> delegate.deleteByGridsetId(layerName, gridSetId));
+        return truncateTiles(
+                store -> store.removeByPrefix(prefix), () -> delegate.deleteByGridsetId(layerName, gridSetId));
     }
 
     @Override
     public boolean deleteByParametersId(String layerName, String parametersId) throws StorageException {
         Set<String> prefixes = keys.forParameters(layerName, parametersId);
-        try {
-            return truncate(
-                    store -> prefixes.forEach(store::removeByPrefix),
-                    () -> delegate.deleteByParametersId(layerName, parametersId));
-        } finally {
-            cache.getWrittenMappings().remove(mappingKey(parametersId));
-        }
+        return truncate(
+                store -> prefixes.forEach(store::removeByPrefix),
+                () -> delegate.deleteByParametersId(layerName, parametersId));
     }
 
     @Override
     public boolean delete(TileObject obj) throws StorageException {
-        String key = keys.forTile(obj);
-        return truncate(store -> store.remove(key), () -> delegate.delete(obj));
+        // disk quota deletes tile by tile, two cache calls each are not worth one stale tile of a former cached layer
+        if (!cached) return delegate.delete(obj);
+        String key = keys.forTile(obj, layer.getId());
+        return truncateTiles(store -> store.remove(key), () -> delegate.delete(obj));
     }
 
     @Override
     public boolean delete(TileRange range) throws StorageException {
-        return truncate(store -> removeRange(store, range), () -> delegate.delete(range));
+        // prefixes first, so that only store failures count as a cache outage
+        List<String> prefixes = IntStream.rangeClosed(range.getZoomStart(), range.getZoomStop())
+                .mapToObj(z -> keys.forZoomLevel(range, z))
+                .toList();
+        return truncateTiles(store -> removeRange(store, range, prefixes), () -> delegate.delete(range));
     }
 
-    private void removeRange(KeyValueStore store, TileRange range) {
-        for (int z = range.getZoomStart(); z <= range.getZoomStop(); z++) {
-            int level = z;
-            store.removeMatching(keys.forZoomLevel(range, z), key -> inRange(range, key, level));
+    /** Removes the range from the cache, {@code prefixes} holding the key prefix of each of its zoom levels. */
+    private static void removeRange(KeyValueStore store, TileRange range, List<String> prefixes) {
+        for (int i = 0; i < prefixes.size(); i++) {
+            int z = range.getZoomStart() + i;
+            store.removeMatching(prefixes.get(i), key -> inRange(range, key, z));
         }
     }
 
-    /** Checks a key ending with {@code <x>/<y>.<extension>} against the range. */
+    /** Checks a key ending with {@code <x>/<y>.<extension>} against the range; a key of any other shape is in it. */
     private static boolean inRange(TileRange range, String key, int z) {
         int dot = key.lastIndexOf('.');
         int ySlash = key.lastIndexOf('/', dot);
         int xSlash = key.lastIndexOf('/', ySlash - 1);
-        long x = Long.parseLong(key, xSlash + 1, ySlash, 10);
-        long y = Long.parseLong(key, ySlash + 1, dot, 10);
-        return range.contains(x, y, z);
+        try {
+            long x = Long.parseLong(key, xSlash + 1, ySlash, 10);
+            long y = Long.parseLong(key, ySlash + 1, dot, 10);
+            return range.contains(x, y, z);
+        } catch (NumberFormatException | IndexOutOfBoundsException e) {
+            // removing more than asked is allowed, throwing would turn one stray key into a cache outage
+            return true;
+        }
     }
 
     @Override
     public void clear() throws StorageException {
-        try {
-            truncate(KeyValueStore::clear, () -> {
-                delegate.clear();
-                return true;
-            });
-        } finally {
-            cache.getWrittenMappings().clear();
-        }
+        truncate(KeyValueStore::clear, () -> {
+            delegate.clear();
+            return true;
+        });
+    }
+
+    /**
+     * A {@link #truncate} of tiles only, leaving the store behind alone when it holds no tiles. Layer and parameters
+     * truncates still reach it, since they also remove metadata and mappings.
+     */
+    private boolean truncateTiles(Consumer<KeyValueStore> removal, StoreTruncate storeTruncate)
+            throws StorageException {
+        // with passthrough off nothing reads through, so the second removal protects nothing, kept to share one
+        // failure path
+        return truncate(removal, () -> !storeHoldsTiles() || storeTruncate.run());
     }
 
     /** Truncate and removes from the cache. */
     private boolean truncate(Consumer<KeyValueStore> removal, StoreTruncate storeTruncate) throws StorageException {
+        // a layer not using the cache only clears leftovers there, not worth waiting for a cache that is down
+        if (!cached && !cache.available()) return storeTruncate.run();
+        // no cache.available() check otherwise: a skipped removal leaves stale tiles, truncates are rare and probe
+        long start = cache.now();
         try {
             removal.accept(cache.getStore());
         } catch (RuntimeException e) {
             // the second removal reports it
-            cache.failed(e);
+            cache.failed(start, e);
         }
         // truncates the store behind, then removes from the cache again, so that a tile read
         // through from the store while it was being truncated does not survive
         boolean result = storeTruncate.run();
+        start = cache.now();
         try {
             removal.accept(cache.getStore());
-            cache.succeeded();
-            return result;
+            cache.succeeded(start);
+            // with passthrough off the store behind holds no tiles, so its false only means it had nothing to delete
+            return result || !storeHoldsTiles();
         } catch (RuntimeException e) {
-            cache.failed(e);
-            StorageException failure =
-                    new StorageException("Tile cache truncate failed, cached tiles may be stale until they expire", e);
-            clearAfterFailure(failure);
+            cache.failed(start, e);
+            // the outage is logged once by the cache; failing here would fail truncates of layers not using it
+            if (!cached) return result;
+            StorageException failure = new StorageException(
+                    "In-memory tile cache truncate failed, cached tiles may be stale until they expire", e);
+            removeAfterFailure(failure);
             throw failure;
         }
     }
 
-    private void clearAfterFailure(StorageException failure) {
+    /**
+     * Removes every tile of the layer, or of every layer when that fails too, as serving tiles a truncate was meant to
+     * remove is worse than rendering them again.
+     */
+    private void removeAfterFailure(StorageException failure) {
+        // the layer prefix first: a full clear empties the cache of every layer on every node
+        try {
+            cache.getStore().removeByPrefix(keys.forLayer(layer.getName()));
+            return;
+        } catch (RuntimeException e) {
+            failure.addSuppressed(e);
+        }
         try {
             cache.getStore().clear();
         } catch (RuntimeException e) {

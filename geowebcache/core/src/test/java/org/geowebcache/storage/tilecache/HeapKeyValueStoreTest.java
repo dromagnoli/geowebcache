@@ -14,21 +14,17 @@
 package org.geowebcache.storage.tilecache;
 
 import static org.hamcrest.MatcherAssert.assertThat;
-import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.lessThanOrEqualTo;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertNull;
 
 import com.google.common.base.Ticker;
-import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.IntStream;
 import org.junit.Test;
 
-public class HeapKeyValueStoreTest {
-
-    private static final List<String> KEYS = List.of("layer/a/1", "layer/a/2", "layer/ab/1", "other/1");
+public class HeapKeyValueStoreTest extends AbstractKeyValueStoreTest {
 
     private final AtomicLong now = new AtomicLong();
 
@@ -39,7 +35,10 @@ public class HeapKeyValueStoreTest {
         }
     };
 
-    private final HeapKeyValueStore store = new HeapKeyValueStore(1000, ticker);
+    @Override
+    protected KeyValueStore createStore() {
+        return new HeapKeyValueStore(1000, ticker);
+    }
 
     @Test
     public void testPerEntryExpiry() {
@@ -59,31 +58,5 @@ public class HeapKeyValueStoreTest {
         long present =
                 IntStream.range(0, 20).filter(i -> store.get("k" + i) != null).count();
         assertThat(present, lessThanOrEqualTo(10L));
-    }
-
-    @Test
-    public void testRemoveByPrefix() {
-        putKeys();
-
-        store.removeByPrefix("layer/a/");
-
-        assertThat(presentKeys(), containsInAnyOrder("layer/ab/1", "other/1"));
-    }
-
-    @Test
-    public void testRemoveMatching() {
-        putKeys();
-
-        store.removeMatching("layer/", key -> key.endsWith("/1"));
-
-        assertThat(presentKeys(), containsInAnyOrder("layer/a/2", "other/1"));
-    }
-
-    private void putKeys() {
-        KEYS.forEach(key -> store.put(key, new byte[] {1}, 300));
-    }
-
-    private List<String> presentKeys() {
-        return KEYS.stream().filter(key -> store.get(key) != null).toList();
     }
 }

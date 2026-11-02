@@ -17,14 +17,13 @@ import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
 import com.google.common.base.Ticker;
-import java.util.Arrays;
+import java.util.EnumMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.logging.Logger;
-import java.util.stream.LongStream;
 import org.geotools.util.logging.Logging;
 
 /** Per-layer read results and failed puts, logged at INFO and reset by the first {@link #report()} of each interval. */
@@ -54,6 +53,9 @@ class TileCacheStats {
 
     private final Map<String, LayerStats> layers = new ConcurrentHashMap<>();
 
+    /** Counters shared by every layer when reports are off, never read. */
+    private final LayerStats discarded = new LayerStats();
+
     /** No report is ever logged with an interval of 0. */
     TileCacheStats(long intervalSeconds, Ticker ticker) {
         this.intervalNanos = SECONDS.toNanos(intervalSeconds);
@@ -62,10 +64,16 @@ class TileCacheStats {
     }
 
     LayerStats forLayer(String layerName) {
+        // never reported, so never pruned: keeping them per layer would only grow with removed and renamed layers
+        if (intervalNanos <= 0) return discarded;
         return layers.computeIfAbsent(layerName, name -> new LayerStats());
     }
 
-    /** Logs and resets the counters of every layer with traffic when the interval is over, cheap otherwise. */
+    /**
+     * Logs and resets the counters of every layer with traffic when the interval is over, cheap otherwise. A layer
+     * without traffic in the interval is dropped, so removed and renamed layers do not stay; a read racing the drop may
+     * go uncounted.
+     */
     void report() {
         if (intervalNanos <= 0) return;
         long now = ticker.read();
@@ -73,51 +81,56 @@ class TileCacheStats {
         // one caller wins the interval, the others go on serving tiles
         if (now - next < 0 || !nextReport.compareAndSet(next, now + intervalNanos)) return;
         long elapsedSeconds = NANOSECONDS.toSeconds(now - next + intervalNanos);
-        layers.forEach((name, stats) -> stats.report(name, elapsedSeconds));
+        layers.forEach((name, stats) -> {
+            if (!stats.report(name, elapsedSeconds)) layers.remove(name, stats);
+        });
     }
 
     /** Counters of one layer, each reset on its own, so a call racing with a report may count in the next interval. */
     static class LayerStats {
 
-        private final LongAdder[] reads = new LongAdder[Result.values().length];
+        /** Filled in the constructor and never changed after, so reads need no lock. */
+        private final Map<Result, LongAdder> reads = new EnumMap<>(Result.class);
 
         private final LongAdder failedPuts = new LongAdder();
 
         LayerStats() {
-            Arrays.setAll(reads, i -> new LongAdder());
+            for (Result result : Result.values()) reads.put(result, new LongAdder());
         }
 
         void read(Result result) {
-            reads[result.ordinal()].increment();
+            reads.get(result).increment();
         }
 
         void failedPut() {
             failedPuts.increment();
         }
 
-        private void report(String layerName, long elapsedSeconds) {
-            long[] counts =
-                    Arrays.stream(reads).mapToLong(LongAdder::sumThenReset).toArray();
-            long total = LongStream.of(counts).sum();
+        /** Logs and resets the counters, returning false, with nothing logged, when there was no traffic. */
+        private boolean report(String layerName, long elapsedSeconds) {
+            Map<Result, Long> counts = new EnumMap<>(Result.class);
+            reads.forEach((result, adder) -> counts.put(result, adder.sumThenReset()));
+            long total = counts.values().stream().mapToLong(Long::longValue).sum();
             long failed = failedPuts.sumThenReset();
-            if (total + failed == 0) return;
+            if (total + failed == 0) return false;
 
-            long hits = counts[Result.HIT.ordinal()];
+            long hits = counts.get(Result.HIT);
             String message = String.format(
                     Locale.ROOT,
-                    "Tile cache stats for layer %s over %d s: %d reads (hit %d, store %d, miss %d, expired %d, error %d),"
-                            + " hit ratio %.1f%%, %d failed puts",
+                    "In-memory tile cache stats for layer %s over %d s: %d reads (hit %d, store %d, miss %d,"
+                            + " expired %d, error %d), hit ratio %.1f%%, %d failed puts",
                     layerName,
                     elapsedSeconds,
                     total,
                     hits,
-                    counts[Result.STORE.ordinal()],
-                    counts[Result.MISS.ordinal()],
-                    counts[Result.EXPIRED.ordinal()],
-                    counts[Result.ERROR.ordinal()],
+                    counts.get(Result.STORE),
+                    counts.get(Result.MISS),
+                    counts.get(Result.EXPIRED),
+                    counts.get(Result.ERROR),
                     total == 0 ? 0 : 100.0 * hits / total,
                     failed);
             LOGGER.info(message);
+            return true;
         }
     }
 }

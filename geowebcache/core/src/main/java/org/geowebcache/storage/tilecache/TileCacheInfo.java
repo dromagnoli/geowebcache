@@ -15,6 +15,7 @@ package org.geowebcache.storage.tilecache;
 
 import java.io.Serial;
 import java.io.Serializable;
+import java.util.Objects;
 
 /** The {@code <tileCache>} settings of {@code geowebcache.xml}; an absent element reads as its default. */
 public class TileCacheInfo implements Serializable {
@@ -46,12 +47,12 @@ public class TileCacheInfo implements Serializable {
         this.enabled = enabled;
     }
 
-    /** Upper bound for the time to live of every tile in seconds, 300 by default. */
+    /** Time to live in seconds of the tiles of layers without an expire server cache, 300 by default. */
     public long getTimeToLive() {
         return timeToLive == null ? DEFAULT_TIME_TO_LIVE : timeToLive;
     }
 
-    /** Sets the upper bound for the time to live of every tile, in seconds and positive. */
+    /** Sets the time to live of the tiles of layers without an expire server cache, in seconds and positive. */
     public void setTimeToLive(long timeToLive) {
         this.timeToLive = timeToLive;
     }
@@ -84,5 +85,21 @@ public class TileCacheInfo implements Serializable {
     /** Sets the backend settings, whose class picks the {@link TileCacheBackend}. */
     public void setBackend(TileCacheBackendInfo backend) {
         this.backend = backend;
+    }
+
+    /** Equal when the effective settings are, an absent value matching its default. */
+    @Override
+    public boolean equals(Object o) {
+        return o instanceof TileCacheInfo other
+                && isEnabled() == other.isEnabled()
+                && getTimeToLive() == other.getTimeToLive()
+                && isPassthrough() == other.isPassthrough()
+                && getStatsInterval() == other.getStatsInterval()
+                && getBackend().equals(other.getBackend());
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(isEnabled(), getTimeToLive(), isPassthrough(), getStatsInterval(), getBackend());
     }
 }
