@@ -297,10 +297,10 @@ public class CompositeBlobStore implements BlobStore, BlobStoreConfigurationList
         TileCache cache = tileCache;
         if (cache != null && cache.getInfo() == info) return cache;
         synchronized (this) {
-            cache = tileCache;
-            if (cache != null && cache.getInfo() == info) return cache;
+            TileCache previous = tileCache;
+            if (previous != null && previous.getInfo() == info) return previous;
             tileCache = new TileCache(info, layers);
-            if (cache != null) cache.close();
+            if (previous != null) previous.close();
             return tileCache;
         }
     }

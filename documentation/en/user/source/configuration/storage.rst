@@ -510,3 +510,146 @@ Additional Information:
 * The package makes use of the open source multi-cloud toolkit `jclouds <https://jclouds.apache.org/>`_ 
 * Jclouds documentation for `getting started with Openstack <https://jclouds.apache.org/guides/openstack/>`_
 * Jclouds documentation for `OpenStack Keystone V3 Support <https://jclouds.apache.org/blog/2018/01/16/keystone-v3/>`_ used in config 
+
+In-memory tile cache
+--------------------
+
+The in-memory tile cache keeps the most requested tiles in memory, in front of the blob stores. It is meant for layers whose tiles
+expire quickly and are requested by many clients at once, where reading each tile from disk or from a cloud store costs more than
+rendering time saved. In particular, it allows to share the tiles among all the nodes of a cluster, so that a tile rendered by one
+node is served by every other node until it expires.
+
+The cache is configured once in :file:`geowebcache.xml`, with the ``tileCache`` element after ``blobStores``, and used by the blob stores
+that set ``memoryCached`` to ``true``. For example:
+
+.. code-block:: xml
+
+    <blobStores>
+      <FileBlobStore default="true">
+        <id>default_cache</id>
+        <memoryCached>true</memoryCached>
+        <enabled>true</enabled>
+        <baseDirectory>/var/cache/gwc</baseDirectory>
+      </FileBlobStore>
+    </blobStores>
+    <tileCache>
+      <enabled>true</enabled>
+      <timeToLive>300</timeToLive>
+      <passthrough>true</passthrough>
+      <statsInterval>300</statsInterval>
+      <backend class="heapTileCache">
+        <maxSizeMB>64</maxSizeMB>
+      </backend>
+    </tileCache>
+
+* **enabled**: whether the cache is used, defaults to ``false``.
+* **timeToLive**: seconds a tile stays in the cache at most, defaults to 300. A shorter ``expireCache`` on the layer applies instead.
+* **passthrough**: whether tiles are also written to, and read from, the blob store. Defaults to ``true``. When ``false``, tiles live in
+  the cache only, and an expired or evicted tile is rendered again.
+* **statsInterval**: seconds between two statistics lines per layer in the log, defaults to 300. ``0`` turns them off.
+* **backend**: where the tiles are kept, named by the ``class`` attribute. Defaults to ``heapTileCache``.
+
+Layer metadata and parameter mappings always stay in the blob store. The cache only holds tiles.
+
+When the backend cannot be reached, tiles are served without the cache, and the log reports when the cache goes down and when
+it comes back. A tile request never fails because of the cache.
+
+Heap backend
+++++++++++++
+
+The ``heapTileCache`` backend keeps tiles in the memory of each node, **not shared** with other nodes. ``maxSizeMB`` (defaults to 64)
+bounds the memory used, the least used tiles are dropped first.
+
+Hazelcast backends
+++++++++++++++++++
+
+The Hazelcast backends keep tiles in a `Hazelcast <https://hazelcast.com/>`_ map, shared by all the nodes. There are two of them:
+
+* ``hazelcastClientTileCache`` connects to a separate Hazelcast cluster, which holds the tiles. Nodes stay small and stateless, and the
+  cluster is sized and restarted on its own.
+* ``hazelcastEmbeddedTileCache`` makes each node a member of the cluster, holding a share of the tiles in its own memory. There is no
+  separate service to run, at the cost of a larger memory footprint per node.
+
+**Hazelcast open source has no authentication nor encryption**. The cluster must only be reachable from the GeoWebCache nodes, for example
+on a private network or with network policies, as anyone reaching it can read and change the tiles.
+
+Client backend
+~~~~~~~~~~~~~~
+
+.. code-block:: xml
+
+    <backend class="hazelcastClientTileCache">
+      <clusterName>dev</clusterName>
+      <members>hazelcast-1:5701, hazelcast-2:5701</members>
+      <mapName>gwc-tiles</mapName>
+    </backend>
+
+* **clusterName**: the name of the cluster, defaults to ``dev``.
+* **members**: comma separated ``host:port`` list of cluster members to connect to, defaults to ``localhost:5701``. One reachable member
+  is enough, the client then finds the others.
+* **mapName**: the map holding the tiles, defaults to ``gwc-tiles``. It must be declared on the cluster, see below.
+
+GeoWebCache starts even when the cluster is down. Tiles are then served without the cache, and the client keeps trying to connect in the
+background, waiting up to 30 seconds between attempts. A request waits at most 5 seconds for an answer from the cluster.
+
+For settings not covered above, such as discovery or timeouts, a :file:`hazelcast-client.xml` file can be placed in the same directory as
+:file:`geowebcache.xml`. When present, it **replaces** ``clusterName``, ``members`` and every connection default, following the
+`Hazelcast client configuration <https://docs.hazelcast.com/hazelcast/5.7/clients/java#configuring-java-client>`_. It is to be noted that
+the client always starts in the background and retries forever, whatever the file says, so that an unreachable cluster never stops
+GeoWebCache: a finite ``cluster-connect-timeout-millis`` is ignored, with a warning in the log. ``mapName`` is still taken from
+:file:`geowebcache.xml`.
+
+Embedded backend
+~~~~~~~~~~~~~~~~
+
+.. code-block:: xml
+
+    <backend class="hazelcastEmbeddedTileCache">
+      <mapName>gwc-tiles</mapName>
+    </backend>
+
+* **mapName**: the map holding the tiles, defaults to ``gwc-tiles``.
+
+The member is configured by a :file:`hazelcast.xml` file, **mandatory**, in the same directory as :file:`geowebcache.xml`, following the
+`Hazelcast member configuration <https://docs.hazelcast.com/hazelcast/5.7/configuration/configuring-declaratively>`_. Changes to the file
+apply on restart.
+
+It is to be noted that the member joins the cluster when the cache is first used, and the request doing so waits for it. A missing
+file, or a file not declaring the map, leaves the cache unusable, with the reason in the log, while tiles keep being served without it.
+
+The following example fits a Kubernetes deployment, where members find each other through a service. The pods need permission to read
+endpoints and pods in their namespace:
+
+.. code-block:: xml
+
+    <hazelcast xmlns="http://www.hazelcast.com/schema/config">
+      <cluster-name>gwc</cluster-name>
+      <network>
+        <join>
+          <multicast enabled="false"/>
+          <kubernetes enabled="true">
+            <namespace>gwc</namespace>
+            <service-name>gwc-hazelcast</service-name>
+          </kubernetes>
+        </join>
+      </network>
+      <map name="gwc-tiles">
+        <backup-count>1</backup-count>
+        <eviction eviction-policy="LRU" max-size-policy="USED_HEAP_PERCENTAGE" size="25"/>
+      </map>
+    </hazelcast>
+
+Declaring the map
+~~~~~~~~~~~~~~~~~
+
+With both backends, the map must be declared in the cluster configuration with an eviction policy and a size bound. **A map without
+them grows until the members run out of memory**, as Hazelcast keeps every entry by default. The embedded backend refuses to start on an
+undeclared map. The client backend cannot check it, so the cluster configuration must be reviewed by hand.
+
+The time to live does not need to be declared, as each tile is stored with its own.
+
+``backup-count`` sets how many other members keep a copy of each tile. With ``1``, losing a member loses no tiles, at the cost of twice
+the memory. With ``0``, tiles of a lost member are rendered again.
+
+Truncating a bounding box reads the keys of the affected zoom level from the cluster into the memory of the node doing it, so very large
+caches need enough memory for that on the GeoWebCache nodes.

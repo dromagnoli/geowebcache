@@ -17,14 +17,13 @@ import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
 import com.google.common.base.Ticker;
-import java.util.Arrays;
+import java.util.EnumMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.logging.Logger;
-import java.util.stream.LongStream;
 import org.geotools.util.logging.Logging;
 
 /** Per-layer read results and failed puts, logged at INFO and reset by the first {@link #report()} of each interval. */
@@ -79,16 +78,17 @@ class TileCacheStats {
     /** Counters of one layer, each reset on its own, so a call racing with a report may count in the next interval. */
     static class LayerStats {
 
-        private final LongAdder[] reads = new LongAdder[Result.values().length];
+        /** Filled in the constructor and never changed after, so reads need no lock. */
+        private final Map<Result, LongAdder> reads = new EnumMap<>(Result.class);
 
         private final LongAdder failedPuts = new LongAdder();
 
         LayerStats() {
-            Arrays.setAll(reads, i -> new LongAdder());
+            for (Result result : Result.values()) reads.put(result, new LongAdder());
         }
 
         void read(Result result) {
-            reads[result.ordinal()].increment();
+            reads.get(result).increment();
         }
 
         void failedPut() {
@@ -96,13 +96,13 @@ class TileCacheStats {
         }
 
         private void report(String layerName, long elapsedSeconds) {
-            long[] counts =
-                    Arrays.stream(reads).mapToLong(LongAdder::sumThenReset).toArray();
-            long total = LongStream.of(counts).sum();
+            Map<Result, Long> counts = new EnumMap<>(Result.class);
+            reads.forEach((result, adder) -> counts.put(result, adder.sumThenReset()));
+            long total = counts.values().stream().mapToLong(Long::longValue).sum();
             long failed = failedPuts.sumThenReset();
             if (total + failed == 0) return;
 
-            long hits = counts[Result.HIT.ordinal()];
+            long hits = counts.get(Result.HIT);
             String message = String.format(
                     Locale.ROOT,
                     "Tile cache stats for layer %s over %d s: %d reads (hit %d, store %d, miss %d, expired %d, error %d),"
@@ -111,10 +111,10 @@ class TileCacheStats {
                     elapsedSeconds,
                     total,
                     hits,
-                    counts[Result.STORE.ordinal()],
-                    counts[Result.MISS.ordinal()],
-                    counts[Result.EXPIRED.ordinal()],
-                    counts[Result.ERROR.ordinal()],
+                    counts.get(Result.STORE),
+                    counts.get(Result.MISS),
+                    counts.get(Result.EXPIRED),
+                    counts.get(Result.ERROR),
                     total == 0 ? 0 : 100.0 * hits / total,
                     failed);
             LOGGER.info(message);
