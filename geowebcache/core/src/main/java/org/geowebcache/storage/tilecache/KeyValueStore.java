@@ -34,8 +34,8 @@ public interface KeyValueStore extends AutoCloseable {
     /** Stores the value for at most {@code ttlSeconds}, positive. */
     void put(String key, byte[] value, long ttlSeconds);
 
-    /** Returns true when the key was present. */
-    boolean remove(String key);
+    /** Removes the entry, if any. */
+    void remove(String key);
 
     /** Removes every entry whose key starts with the prefix. Other nodes see the removal on return. */
     void removeByPrefix(String prefix);

@@ -20,6 +20,9 @@ import com.hazelcast.core.HazelcastInstance;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.Executor;
 import org.geowebcache.config.ConfigurationResourceProvider;
 import org.geowebcache.storage.tilecache.KeyValueStore;
 import org.geowebcache.storage.tilecache.TileCacheBackend;
@@ -32,9 +35,22 @@ import org.springframework.beans.factory.DisposableBean;
  */
 public class HazelcastEmbeddedTileCacheBackend implements TileCacheBackend, DisposableBean {
 
+    /** One short-lived daemon thread per member start, which happens once per application context. */
+    private static final Executor START = task -> {
+        Thread thread = new Thread(task, "gwc-hazelcast-member-start");
+        thread.setDaemon(true);
+        thread.start();
+    };
+
     private final ConfigurationResourceProvider memberXml;
 
-    private HazelcastInstance member;
+    /** The member configuration, read once. */
+    private Config config;
+
+    /** The member, joining its cluster in the background; null once destroyed. Written under the lock only. */
+    private volatile CompletableFuture<HazelcastInstance> member;
+
+    private HazelcastLockProvider lockProvider;
 
     /** Starts the member from {@code memberXml}, which must exist and declare the tile map. */
     public HazelcastEmbeddedTileCacheBackend(ConfigurationResourceProvider memberXml) {
@@ -52,21 +68,60 @@ public class HazelcastEmbeddedTileCacheBackend implements TileCacheBackend, Disp
     }
 
     /**
-     * Returns a store on the member, starting it first if needed; the start blocks until the member joins its cluster.
+     * Returns a store on the member, starting it first if needed. Returns at once: the store fails its calls until the
+     * member has joined its cluster, and a member that failed to start or stopped is started again on the next call.
      *
      * @throws IllegalStateException when the file is missing or does not declare the map
      */
     @Override
     public synchronized KeyValueStore createStore(TileCacheBackendInfo info) {
         String mapName = ((HazelcastEmbeddedTileCacheBackendInfo) info).getMapName();
-        Config config = member == null ? memberConfig() : member.getConfig();
+        if (config == null) config = memberConfig();
         // an undeclared map would get the defaults: no eviction, no size bound, tiles filling the heap of every node
         if (config.getMapConfigOrNull(mapName) == null) {
             throw new IllegalStateException("Map " + mapName + " is not declared in hazelcast.xml in "
                     + memberXml.getId() + ", declare it with eviction and a maximum size");
         }
-        if (member == null) member = Hazelcast.newHazelcastInstance(config);
-        return new HazelcastKeyValueStore(member, mapName);
+        if (member == null) start();
+        // closed when the cache settings change, so a switch to another backend stops the cluster locks
+        Runnable stopLocking = lockProvider == null ? () -> {} : lockProvider.lockOn(this::running, mapName);
+        return new HazelcastKeyValueStore(this::running, mapName, stopLocking);
+    }
+
+    /** Makes {@code lockProvider} lock on the member of the stores created from now on. */
+    public synchronized void setLockProvider(HazelcastLockProvider lockProvider) {
+        this.lockProvider = lockProvider;
+    }
+
+    /** Starts the member on its own thread, as joining takes seconds and callers hold the blob store lock. */
+    private void start() {
+        member = CompletableFuture.supplyAsync(() -> Hazelcast.newHazelcastInstance(config), START);
+    }
+
+    /** The joined member; lock free on this path, as every cache call goes through it. */
+    private HazelcastInstance running() {
+        CompletableFuture<HazelcastInstance> current = member;
+        if (current == null) throw new IllegalStateException("Embedded Hazelcast member shut down");
+        if (!current.isDone()) throw new IllegalStateException("Embedded Hazelcast member still joining");
+        HazelcastInstance joined;
+        try {
+            joined = current.join();
+        } catch (CompletionException e) {
+            restart(current);
+            throw new IllegalStateException("Embedded Hazelcast member failed to start, starting again", e.getCause());
+        }
+        // stopped by an out of memory error, or by a cluster shutdown from another member
+        if (joined.getLifecycleService().isRunning()) return joined;
+        restart(current);
+        throw new IllegalStateException("Embedded Hazelcast member stopped, starting again");
+    }
+
+    /**
+     * Starts a new member unless another call already did, or the backend was destroyed. Calls reach it at most once
+     * per retry interval of the cache, so restarts need no backoff of their own.
+     */
+    private synchronized void restart(CompletableFuture<HazelcastInstance> failed) {
+        if (member == failed) start();
     }
 
     private Config memberConfig() {
@@ -81,10 +136,10 @@ public class HazelcastEmbeddedTileCacheBackend implements TileCacheBackend, Disp
         }
     }
 
-    /** Shuts the member down, leaving the cluster; stores still using it fail their calls. */
+    /** Shuts the member down, leaving the cluster, or once it has joined if still joining; stores fail their calls. */
     @Override
     public synchronized void destroy() {
-        if (member != null) member.shutdown();
+        if (member != null) member.thenAccept(HazelcastInstance::shutdown);
         member = null;
     }
 }

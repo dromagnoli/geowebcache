@@ -71,7 +71,8 @@ public class GeoWebCacheConfiguration {
 
     private List<BlobStoreInfo> blobStores;
 
-    private TileCacheInfo tileCache;
+    // volatile, as tile requests read it while a save replaces it; the instance is never changed once set
+    private volatile TileCacheInfo tileCache;
 
     private List<XMLGridSet> gridSets;
 

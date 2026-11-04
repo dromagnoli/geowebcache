@@ -13,6 +13,7 @@
  */
 package org.geowebcache.hazelcast;
 
+import static com.hazelcast.client.properties.ClientProperty.INVOCATION_TIMEOUT_SECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.awaitility.Awaitility.await;
 import static org.geowebcache.hazelcast.HazelcastTestMembers.CLUSTER;
@@ -20,9 +21,12 @@ import static org.geowebcache.hazelcast.HazelcastTestMembers.freePort;
 import static org.geowebcache.hazelcast.HazelcastTestMembers.start;
 import static org.geowebcache.hazelcast.HazelcastTestMembers.xml;
 import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThrows;
 
 import com.hazelcast.client.HazelcastClientOfflineException;
+import com.hazelcast.client.config.ClientConfig;
+import com.hazelcast.client.config.ConnectionRetryConfig;
 import com.hazelcast.core.HazelcastInstance;
 import org.geowebcache.storage.tilecache.KeyValueStore;
 import org.junit.After;
@@ -51,11 +55,27 @@ public class HazelcastClientXmlTest {
             </hazelcast-client>
             """;
 
+    /** Sets what the backend otherwise fills in. */
+    private static final String TUNED_XML =
+            """
+            <hazelcast-client xmlns="http://www.hazelcast.com/schema/client-config">
+              <properties>
+                <property name="hazelcast.client.invocation.timeout.seconds">20</property>
+              </properties>
+              <connection-strategy>
+                <connection-retry>
+                  <multiplier>1.5</multiplier>
+                  <jitter>0.5</jitter>
+                </connection-retry>
+              </connection-strategy>
+            </hazelcast-client>
+            """;
+
     private static HazelcastInstance member;
 
     private static int port;
 
-    /** Default settings point to localhost:5701 in cluster "dev", reaching the member only through the file. */
+    /** Default settings point to localhost:5701 in cluster "gwc", reaching the member only through the file. */
     private final HazelcastClientTileCacheBackendInfo settings = new HazelcastClientTileCacheBackendInfo();
 
     private HazelcastClientTileCacheBackend backend;
@@ -80,11 +100,28 @@ public class HazelcastClientXmlTest {
     public void testFileReplacesSettings() {
         backend = new HazelcastClientTileCacheBackend(xml(CLIENT_XML.formatted(CLUSTER, port)));
 
-        KeyValueStore store = backend.createStore(settings);
-        await().atMost(30, SECONDS).ignoreExceptions().until(() -> store.get("probe") == null);
-        store.put("key", new byte[] {1}, 300);
+        try (KeyValueStore store = backend.createStore(settings)) {
+            await().atMost(30, SECONDS).ignoreExceptions().until(() -> store.get("probe") == null);
+            store.put("key", new byte[] {1}, 300);
 
-        assertArrayEquals(new byte[] {1}, store.get("key"));
+            assertArrayEquals(new byte[] {1}, store.get("key"));
+        }
+    }
+
+    @Test
+    public void testDefaultsUnlessFileSetsThem() {
+        backend = new HazelcastClientTileCacheBackend(xml(CLIENT_XML.formatted(CLUSTER, port)));
+        ClientConfig config = backend.clientConfig(settings);
+        assertEquals("5", config.getProperty(INVOCATION_TIMEOUT_SECONDS.getName()));
+        ConnectionRetryConfig retry = config.getConnectionStrategyConfig().getConnectionRetryConfig();
+        assertEquals(2, retry.getMultiplier(), 0);
+        assertEquals(0.2, retry.getJitter(), 0);
+
+        config = new HazelcastClientTileCacheBackend(xml(TUNED_XML)).clientConfig(settings);
+        assertEquals("20", config.getProperty(INVOCATION_TIMEOUT_SECONDS.getName()));
+        retry = config.getConnectionStrategyConfig().getConnectionRetryConfig();
+        assertEquals(1.5, retry.getMultiplier(), 0);
+        assertEquals(0.5, retry.getJitter(), 0);
     }
 
     @Test
@@ -92,11 +129,11 @@ public class HazelcastClientXmlTest {
         backend = new HazelcastClientTileCacheBackend(xml(CLIENT_XML.formatted(CLUSTER, 1)));
 
         // async start enforced: with the file's blocking start this would wait, then fail
-        KeyValueStore store = backend.createStore(settings);
-
-        // past the file's 1 s connect timeout the client still retries instead of shutting down
-        await().pollDelay(2, SECONDS)
-                .atMost(5, SECONDS)
-                .untilAsserted(() -> assertThrows(HazelcastClientOfflineException.class, () -> store.get("key")));
+        try (KeyValueStore store = backend.createStore(settings)) {
+            // past the file's 1 s connect timeout the client still retries instead of shutting down
+            await().pollDelay(2, SECONDS)
+                    .atMost(5, SECONDS)
+                    .untilAsserted(() -> assertThrows(HazelcastClientOfflineException.class, () -> store.get("key")));
+        }
     }
 }

@@ -53,6 +53,7 @@ final class HazelcastTestMembers {
     }
 
     /** Starts a member on {@code port}, joining the members at {@code ports} as well. */
+    @SuppressWarnings("PMD.AvoidUsingHardCodedIP") // loopback only, test members never join a real cluster
     static HazelcastInstance start(int port, int... ports) {
         Config config = new Config().setClusterName(CLUSTER);
         config.setProperty("hazelcast.phone.home.enabled", "false");

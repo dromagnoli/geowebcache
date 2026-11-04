@@ -33,4 +33,16 @@ public class HazelcastEmbeddedTileCacheBackendInfo implements TileCacheBackendIn
     public void setMapName(String mapName) {
         this.mapName = mapName;
     }
+
+    /** Equal when the effective settings are, an absent value matching its default. */
+    @Override
+    public boolean equals(Object o) {
+        return o instanceof HazelcastEmbeddedTileCacheBackendInfo other
+                && getMapName().equals(other.getMapName());
+    }
+
+    @Override
+    public int hashCode() {
+        return getMapName().hashCode();
+    }
 }

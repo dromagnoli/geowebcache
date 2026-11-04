@@ -13,17 +13,25 @@
  */
 package org.geowebcache.hazelcast;
 
+import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.awaitility.Awaitility.await;
 import static org.geowebcache.hazelcast.HazelcastTestMembers.CLUSTER;
 import static org.geowebcache.hazelcast.HazelcastTestMembers.NO_FILE;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.lessThan;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 
 import com.hazelcast.client.HazelcastClientOfflineException;
 import com.hazelcast.core.HazelcastInstance;
+import com.hazelcast.core.OperationTimeoutException;
+import com.hazelcast.map.IMap;
+import com.hazelcast.map.MapInterceptor;
+import java.util.Arrays;
 import java.util.stream.IntStream;
 import org.geowebcache.storage.tilecache.AbstractKeyValueStoreTest;
 import org.geowebcache.storage.tilecache.KeyValueStore;
@@ -31,6 +39,7 @@ import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
+import org.junit.function.ThrowingRunnable;
 
 /** Runs the store against a member started in the test JVM, reached through the client backend. */
 public class HazelcastKeyValueStoreTest extends AbstractKeyValueStoreTest {
@@ -84,13 +93,14 @@ public class HazelcastKeyValueStoreTest extends AbstractKeyValueStoreTest {
 
     @Test
     public void testOtherClientSeesRemoval() {
-        KeyValueStore other = connectedStore(otherBackend);
-        store.put("layer/a/1", new byte[] {1}, 300);
-        assertArrayEquals(new byte[] {1}, other.get("layer/a/1"));
+        try (KeyValueStore other = connectedStore(otherBackend)) {
+            store.put("layer/a/1", new byte[] {1}, 300);
+            assertArrayEquals(new byte[] {1}, other.get("layer/a/1"));
 
-        store.removeByPrefix("layer/");
+            store.removeByPrefix("layer/");
 
-        assertNull(other.get("layer/a/1"));
+            assertNull(other.get("layer/a/1"));
+        }
     }
 
     @Test
@@ -99,9 +109,9 @@ public class HazelcastKeyValueStoreTest extends AbstractKeyValueStoreTest {
         unreachable.setClusterName(CLUSTER);
         unreachable.setMembers("127.0.0.1:1");
 
-        KeyValueStore offline = otherBackend.createStore(unreachable);
-
-        assertThrows(HazelcastClientOfflineException.class, () -> offline.get("key"));
+        try (KeyValueStore offline = otherBackend.createStore(unreachable)) {
+            assertThrows(HazelcastClientOfflineException.class, () -> offline.get("key"));
+        }
     }
 
     @Test
@@ -124,5 +134,90 @@ public class HazelcastKeyValueStoreTest extends AbstractKeyValueStoreTest {
                 .filter(i -> store.get("layer/" + i) != null)
                 .count();
         assertEquals(1, present);
+    }
+
+    @Test
+    public void testRemoveMatchingWidenedPastLimit() {
+        try (KeyValueStore limited = new HazelcastKeyValueStore(
+                () -> member, settings.getMapName(), 3, HazelcastKeyValueStore.CALL_TIMEOUT, () -> {})) {
+            IntStream.range(0, 3).forEach(i -> store.put("layer/1/" + i, new byte[] {1}, 300));
+            store.put("layer/2/0", new byte[] {1}, 300);
+
+            // at the limit, only the matching keys go
+            limited.removeMatching("layer/1/", key -> key.equals("layer/1/0"));
+            assertNull(store.get("layer/1/0"));
+            assertNotNull(store.get("layer/1/1"));
+
+            // past it, every key under the prefix goes, and only those
+            IntStream.range(3, 5).forEach(i -> store.put("layer/1/" + i, new byte[] {1}, 300));
+            limited.removeMatching("layer/1/", key -> key.equals("layer/1/3"));
+            assertNull(store.get("layer/1/1"));
+            assertNull(store.get("layer/1/4"));
+            assertNotNull(store.get("layer/2/0"));
+        }
+    }
+
+    @Test
+    public void testStalledMemberFailsWithinCallTimeout() {
+        // own map, as the stalled partition thread holds every call on its partition
+        IMap<String, byte[]> map = member.getMap("stalled-tiles");
+        map.set("tile", Stall.VALUE);
+        String interceptor = map.addInterceptor(new Stall());
+        try (KeyValueStore stalled = new HazelcastKeyValueStore(
+                () -> member, "stalled-tiles", HazelcastKeyValueStore.MATCHING_LIMIT, 200, () -> {})) {
+            assertFailsFast(() -> stalled.get("tile"));
+            assertFailsFast(() -> stalled.put("other", Stall.VALUE, 300));
+        } finally {
+            map.removeInterceptor(interceptor);
+        }
+    }
+
+    private static void assertFailsFast(ThrowingRunnable call) {
+        long start = System.nanoTime();
+        assertThrows(OperationTimeoutException.class, call);
+        assertThat(NANOSECONDS.toMillis(System.nanoTime() - start), lessThan(Stall.MILLIS));
+    }
+
+    /** Holds the member partition thread on every read or write of {@link #VALUE}, as a stalled member does. */
+    static class Stall implements MapInterceptor {
+
+        static final byte[] VALUE = {42};
+
+        static final long MILLIS = 1500;
+
+        @Override
+        public Object interceptGet(Object value) {
+            stallOn(value);
+            return null;
+        }
+
+        @Override
+        public Object interceptPut(Object oldValue, Object newValue) {
+            stallOn(newValue);
+            return null;
+        }
+
+        private static void stallOn(Object value) {
+            if (!(value instanceof byte[] bytes) || !Arrays.equals(bytes, VALUE)) return;
+            try {
+                Thread.sleep(MILLIS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+
+        @Override
+        public void afterGet(Object value) {}
+
+        @Override
+        public Object interceptRemove(Object removedValue) {
+            return null;
+        }
+
+        @Override
+        public void afterPut(Object value) {}
+
+        @Override
+        public void afterRemove(Object oldValue) {}
     }
 }

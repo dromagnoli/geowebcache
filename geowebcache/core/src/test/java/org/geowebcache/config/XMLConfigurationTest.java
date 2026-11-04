@@ -19,6 +19,7 @@ import static org.easymock.EasyMock.replay;
 import static org.hamcrest.CoreMatchers.instanceOf;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsInAnyOrder;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
@@ -44,6 +45,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URL;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -76,6 +78,7 @@ import org.geowebcache.layer.wms.WMSLayer;
 import org.geowebcache.storage.UnsuitableStorageException;
 import org.geowebcache.storage.tilecache.HeapTileCacheBackendInfo;
 import org.geowebcache.storage.tilecache.TileCacheInfo;
+import org.geowebcache.storage.tilecache.UnresolvedTileCacheBackendInfo;
 import org.geowebcache.util.TestUtils;
 import org.junit.Assume;
 import org.junit.Before;
@@ -825,6 +828,33 @@ public class XMLConfigurationTest {
         assertFalse(reloaded.isPassthrough());
         assertEquals(60, reloaded.getStatsInterval());
         assertEquals(128, ((HeapTileCacheBackendInfo) reloaded.getBackend()).getMaxSizeMB());
+    }
+
+    @Test
+    public void testUnknownBackendKeptAsIs() throws Exception {
+        TileCacheInfo tileCache = new TileCacheInfo();
+        tileCache.setEnabled(true);
+        tileCache.setBackend(new HeapTileCacheBackendInfo());
+        config.setTileCache(tileCache);
+        // as left by a removed backend module
+        String xml = Files.readString(configFile.toPath())
+                .replaceAll(
+                        "(?s)<backend class=\"heapTileCache\"(/>|>.*?</backend>)",
+                        "<backend class=\"removedTileCache\"><host>cache-1</host><port>5701</port></backend>");
+        Files.writeString(configFile.toPath(), xml);
+
+        XMLConfiguration reloaded = reload();
+        UnresolvedTileCacheBackendInfo backend =
+                (UnresolvedTileCacheBackendInfo) reloaded.getTileCache().getBackend();
+        assertEquals("removedTileCache", backend.getAlias());
+
+        // saved back as it was, so reinstalling the module restores it
+        reloaded.setTileCache(reloaded.getTileCache());
+        assertValidAgainstSchema();
+        String saved = Files.readString(configFile.toPath());
+        assertThat(saved, containsString("<backend class=\"removedTileCache\">"));
+        assertThat(saved, containsString("<host>cache-1</host>"));
+        assertThat(saved, containsString("<port>5701</port>"));
     }
 
     @Test

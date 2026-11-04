@@ -519,19 +519,11 @@ expire quickly and are requested by many clients at once, where reading each til
 rendering time saved. In particular, it allows to share the tiles among all the nodes of a cluster, so that a tile rendered by one
 node is served by every other node until it expires.
 
-The cache is configured once in :file:`geowebcache.xml`, with the ``tileCache`` element after ``blobStores``, and used by the blob stores
+The cache is configured once in :file:`geowebcache.xml`, with the ``tileCache`` element after ``blobStores``, and used by the layers
 that set ``memoryCached`` to ``true``. For example:
 
 .. code-block:: xml
 
-    <blobStores>
-      <FileBlobStore default="true">
-        <id>default_cache</id>
-        <memoryCached>true</memoryCached>
-        <enabled>true</enabled>
-        <baseDirectory>/var/cache/gwc</baseDirectory>
-      </FileBlobStore>
-    </blobStores>
     <tileCache>
       <enabled>true</enabled>
       <timeToLive>300</timeToLive>
@@ -543,16 +535,36 @@ that set ``memoryCached`` to ``true``. For example:
     </tileCache>
 
 * **enabled**: whether the cache is used, defaults to ``false``.
-* **timeToLive**: seconds a tile stays in the cache at most, defaults to 300. A shorter ``expireCache`` on the layer applies instead.
+* **timeToLive**: seconds a tile stays in the cache when its layer sets no ``expireCache``, defaults to 300. A layer ``expireCache``
+  applies instead, whether shorter or longer.
 * **passthrough**: whether tiles are also written to, and read from, the blob store. Defaults to ``true``. When ``false``, tiles live in
-  the cache only, and an expired or evicted tile is rendered again.
+  the cache only, and an expired or evicted tile is rendered again. Truncating a tile, an area or a gridset then leaves the blob store
+  alone, so tiles it still holds from before are kept: truncate the whole layer before turning ``passthrough`` back on.
 * **statsInterval**: seconds between two statistics lines per layer in the log, defaults to 300. ``0`` turns them off.
-* **backend**: where the tiles are kept, named by the ``class`` attribute. Defaults to ``heapTileCache``.
+* **backend**: where the tiles are kept, named by the ``class`` attribute. Defaults to ``heapTileCache``. When the module of the backend
+  is removed, GeoWebCache still starts: the cache is unusable, with the reason in the log, and the backend settings are kept as they are,
+  so that installing the module again restores them.
+
+Each layer opts in with ``memoryCached``, off by default, placed before the layer ``name``:
+
+.. code-block:: xml
+
+    <wmsLayer>
+      <memoryCached>true</memoryCached>
+      <name>topp:states</name>
+      ...
+    </wmsLayer>
+
+**Nodes sharing one** :file:`geowebcache.xml` **read the** ``tileCache`` **settings when they start or reload**: after changing them,
+reload or restart every other node. It is to be noted that until then, another node saving its configuration (a blob store or a
+gridset change) writes its old ``tileCache`` settings back over the change.
 
 Layer metadata and parameter mappings always stay in the blob store. The cache only holds tiles.
 
 When the backend cannot be reached, tiles are served without the cache, and the log reports when the cache goes down and when
-it comes back. A tile request never fails because of the cache.
+it comes back. A tile request never fails because of the cache. While the cache is down, tile requests do not wait for it: each node
+tries it again from time to time, from every second at the start of the outage up to every 30 seconds for long ones. A cache that keeps
+going down and up again is reported once with its error, then with a short "unreachable again" line each time.
 
 Heap backend
 ++++++++++++
@@ -584,20 +596,25 @@ Client backend
       <mapName>gwc-tiles</mapName>
     </backend>
 
-* **clusterName**: the name of the cluster, defaults to ``dev``.
+* **clusterName**: the name of the cluster, defaults to ``gwc``.
 * **members**: comma separated ``host:port`` list of cluster members to connect to, defaults to ``localhost:5701``. One reachable member
   is enough, the client then finds the others.
 * **mapName**: the map holding the tiles, defaults to ``gwc-tiles``. It must be declared on the cluster, see below.
+
+**clusterName and members apply on restart only**: the client connects once, the first time the cache is used, and keeps that
+connection until GeoWebCache stops. Saving new values, or reloading the configuration, does not change it. ``mapName`` applies on save.
 
 GeoWebCache starts even when the cluster is down. Tiles are then served without the cache, and the client keeps trying to connect in the
 background, waiting up to 30 seconds between attempts. A request waits at most 5 seconds for an answer from the cluster.
 
 For settings not covered above, such as discovery or timeouts, a :file:`hazelcast-client.xml` file can be placed in the same directory as
-:file:`geowebcache.xml`. When present, it **replaces** ``clusterName``, ``members`` and every connection default, following the
+:file:`geowebcache.xml`. When present, it **replaces** ``clusterName``, ``members`` and the connection defaults, following the
 `Hazelcast client configuration <https://docs.hazelcast.com/hazelcast/5.7/clients/java#configuring-java-client>`_. It is to be noted that
 the client always starts in the background and retries forever, whatever the file says, so that an unreachable cluster never stops
 GeoWebCache: a finite ``cluster-connect-timeout-millis`` is ignored, with a warning in the log. ``mapName`` is still taken from
-:file:`geowebcache.xml`.
+:file:`geowebcache.xml`. The file also keeps the 5 seconds request timeout and the retry ``multiplier`` (2) and ``jitter`` (0.2) of
+the cache, unless it sets ``hazelcast.client.invocation.timeout.seconds``, ``multiplier`` or ``jitter`` itself. Changes to the file
+apply on restart only.
 
 Embedded backend
 ~~~~~~~~~~~~~~~~
@@ -614,8 +631,11 @@ The member is configured by a :file:`hazelcast.xml` file, **mandatory**, in the 
 `Hazelcast member configuration <https://docs.hazelcast.com/hazelcast/5.7/configuration/configuring-declaratively>`_. Changes to the file
 apply on restart.
 
-It is to be noted that the member joins the cluster when the cache is first used, and the request doing so waits for it. A missing
+It is to be noted that the member joins the cluster in the background when the cache is first used. Tile requests do not wait for it, they
+are served without the cache until the member has joined, and the log reports the cache unreachable then reachable again. A missing
 file, or a file not declaring the map, leaves the cache unusable, with the reason in the log, while tiles keep being served without it.
+A member that fails to start, or stops later, for example after running out of memory or through a cluster shutdown, is started again
+when the cache is next tried, at most every 30 seconds.
 
 The following example fits a Kubernetes deployment, where members find each other through a service. The pods need permission to read
 endpoints and pods in their namespace:
@@ -651,5 +671,8 @@ The time to live does not need to be declared, as each tile is stored with its o
 ``backup-count`` sets how many other members keep a copy of each tile. With ``1``, losing a member loses no tiles, at the cost of twice
 the memory. With ``0``, tiles of a lost member are rendered again.
 
-Truncating a bounding box reads the keys of the affected zoom level from the cluster into the memory of the node doing it, so very large
-caches need enough memory for that on the GeoWebCache nodes.
+Truncating a bounding box reads the keys of each affected zoom level, for one parameter set and format, into the memory of the node doing
+it, and removes the tiles inside the box. **Above 100,000 tiles in a zoom level it removes the whole zoom level instead**, with a line in
+the log, so that the node memory stays bounded: the extra tiles are rendered again when requested. The limit can be changed with the
+``GWC_TILECACHE_MATCHING_LIMIT`` system property, servlet context parameter or environment variable, ``0`` always removing the whole
+zoom level; it applies when the cache settings are next saved or on restart.

@@ -19,6 +19,8 @@ import static org.geowebcache.storage.tilecache.TileCacheStats.Result.MISS;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.empty;
+import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertSame;
 
 import com.google.common.base.Ticker;
 import java.util.concurrent.atomic.AtomicLong;
@@ -58,8 +60,8 @@ public class TileCacheStatsTest {
         stats.report();
         assertThat(
                 log.lines,
-                contains("Tile cache stats for layer roads over 300 s: 4 reads (hit 3, store 0, miss 1, expired 0,"
-                        + " error 0), hit ratio 75.0%, 1 failed puts"));
+                contains("In-memory tile cache stats for layer roads over 300 s: 4 reads (hit 3, store 0, miss 1,"
+                        + " expired 0, error 0), hit ratio 75.0%, 1 failed puts"));
     }
 
     @Test
@@ -76,8 +78,23 @@ public class TileCacheStatsTest {
 
         assertThat(
                 log.lines,
-                contains("Tile cache stats for layer roads over 400 s: 1 reads (hit 0, store 0, miss 1, expired 0,"
-                        + " error 0), hit ratio 0.0%, 0 failed puts"));
+                contains("In-memory tile cache stats for layer roads over 400 s: 1 reads (hit 0, store 0, miss 1,"
+                        + " expired 0, error 0), hit ratio 0.0%, 0 failed puts"));
+    }
+
+    @Test
+    public void testIdleLayerDropped() {
+        LayerStats removed = stats.forLayer("removed");
+        removed.read(HIT);
+        now.addAndGet(SECONDS.toNanos(300));
+        stats.report();
+        assertSame(removed, stats.forLayer("removed"));
+
+        // a whole interval without traffic, as for a removed or renamed layer
+        now.addAndGet(SECONDS.toNanos(300));
+        stats.report();
+
+        assertNotSame(removed, stats.forLayer("removed"));
     }
 
     @Test

@@ -14,6 +14,7 @@
 package org.geowebcache.hazelcast;
 
 import java.io.Serial;
+import java.util.Objects;
 import org.geowebcache.storage.tilecache.TileCacheBackendInfo;
 
 /** Settings of the {@link HazelcastClientTileCacheBackend}; an absent element reads as its default. */
@@ -22,7 +23,7 @@ public class HazelcastClientTileCacheBackendInfo implements TileCacheBackendInfo
     @Serial
     private static final long serialVersionUID = 1L;
 
-    static final String DEFAULT_CLUSTER_NAME = "dev";
+    static final String DEFAULT_CLUSTER_NAME = "gwc";
 
     static final String DEFAULT_MEMBERS = "localhost:5701";
 
@@ -34,7 +35,7 @@ public class HazelcastClientTileCacheBackendInfo implements TileCacheBackendInfo
 
     private String mapName;
 
-    /** Name of the cluster to join, "dev" by default as in Hazelcast. */
+    /** Name of the cluster to join, "gwc" by default, as in the embedded backend example. */
     public String getClusterName() {
         return clusterName == null ? DEFAULT_CLUSTER_NAME : clusterName;
     }
@@ -62,5 +63,19 @@ public class HazelcastClientTileCacheBackendInfo implements TileCacheBackendInfo
     /** Sets the name of the map holding the tiles. */
     public void setMapName(String mapName) {
         this.mapName = mapName;
+    }
+
+    /** Equal when the effective settings are, an absent value matching its default. */
+    @Override
+    public boolean equals(Object o) {
+        return o instanceof HazelcastClientTileCacheBackendInfo other
+                && getClusterName().equals(other.getClusterName())
+                && getMembers().equals(other.getMembers())
+                && getMapName().equals(other.getMapName());
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(getClusterName(), getMembers(), getMapName());
     }
 }

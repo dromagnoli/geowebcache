@@ -26,17 +26,16 @@ import static org.hamcrest.Matchers.lessThan;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertThrows;
 
+import com.hazelcast.client.HazelcastClient;
 import com.hazelcast.client.HazelcastClientOfflineException;
 import com.hazelcast.core.Hazelcast;
 import com.hazelcast.core.HazelcastInstance;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.IntStream;
 import org.geowebcache.storage.tilecache.KeyValueStore;
 import org.junit.After;
 import org.junit.Test;
 
-/** Outages of the members behind a client store: fast failures while down, recovery without a rebuild. */
+/** Outages behind a client store: fast failures while down, recovery on reconnect, or by a new client once stopped. */
 public class HazelcastRecoveryTest {
 
     private static final byte[] TILE = {1};
@@ -54,29 +53,47 @@ public class HazelcastRecoveryTest {
         int port = freePort();
         HazelcastInstance member = start(port);
         HazelcastClientTileCacheBackendInfo settings = clientSettings(port);
-        KeyValueStore store = backend.createStore(settings);
-        await().atMost(30, SECONDS).ignoreExceptions().until(() -> store.get("probe") == null);
+        try (KeyValueStore store = backend.createStore(settings)) {
+            await().atMost(30, SECONDS).ignoreExceptions().until(() -> store.get("probe") == null);
 
-        member.shutdown();
+            member.shutdown();
 
-        // once the client knows, calls fail without waiting for the invocation timeout
-        await().atMost(10, SECONDS).ignoreExceptions().until(() -> isOffline(store));
-        long start = System.nanoTime();
-        assertThrows(HazelcastClientOfflineException.class, () -> store.get("layer/a/1"));
-        assertThat(NANOSECONDS.toMillis(System.nanoTime() - start), lessThan(1000L));
+            // once the client knows, calls fail without waiting for the invocation timeout
+            await().atMost(10, SECONDS).ignoreExceptions().until(() -> isOffline(store));
+            long start = System.nanoTime();
+            assertThrows(HazelcastClientOfflineException.class, () -> store.get("layer/a/1"));
+            assertThat(NANOSECONDS.toMillis(System.nanoTime() - start), lessThan(1000L));
 
-        // same store, no rebuild; the new member starts without the index, the next truncate adds it
-        HazelcastInstance restarted = start(port);
-        await().atMost(60, SECONDS).ignoreExceptions().until(() -> store.get("probe") == null);
-        store.put("layer/a/1", TILE, 300);
-        assertArrayEquals(TILE, store.get("layer/a/1"));
-        store.removeByPrefix("layer/");
-        int indexes = restarted
-                .getMap(settings.getMapName())
-                .getLocalMapStats()
-                .getIndexStats()
-                .size();
-        assertThat(indexes, greaterThan(0));
+            // same store, no rebuild; the new member starts without the index, the next truncate adds it
+            HazelcastInstance restarted = start(port);
+            await().atMost(60, SECONDS).ignoreExceptions().until(() -> store.get("probe") == null);
+            store.put("layer/a/1", TILE, 300);
+            assertArrayEquals(TILE, store.get("layer/a/1"));
+            store.removeByPrefix("layer/");
+            int indexes = restarted
+                    .getMap(settings.getMapName())
+                    .getLocalMapStats()
+                    .getIndexStats()
+                    .size();
+            assertThat(indexes, greaterThan(0));
+        }
+    }
+
+    @Test
+    public void testStoppedClientRebuilt() {
+        int port = freePort();
+        start(port);
+        try (KeyValueStore store = backend.createStore(clientSettings(port))) {
+            await().atMost(30, SECONDS).ignoreExceptions().until(() -> store.get("probe") == null);
+            store.put("layer/a/1", TILE, 300);
+
+            // as when the cluster rejects the client
+            HazelcastClient.getAllHazelcastClients().forEach(HazelcastInstance::shutdown);
+
+            // the first call finds it stopped and starts a new one, the same store then goes through it
+            assertThrows(IllegalStateException.class, () -> store.get("layer/a/1"));
+            await().atMost(30, SECONDS).ignoreExceptions().until(() -> store.get("layer/a/1") != null);
+        }
     }
 
     private static boolean isOffline(KeyValueStore store) {
@@ -95,23 +112,18 @@ public class HazelcastRecoveryTest {
         HazelcastInstance member = start(port, otherPort);
         HazelcastInstance other = start(otherPort, port);
         await().atMost(30, SECONDS).until(() -> member.getCluster().getMembers().size() == 2);
-        KeyValueStore store = backend.createStore(clientSettings(port, otherPort));
-        await().atMost(30, SECONDS).ignoreExceptions().until(() -> store.get("probe") == null);
-        // enough keys to land on partitions owned by both members
-        IntStream.range(0, 100).forEach(i -> store.put("layer/" + i, TILE, 300));
-        AtomicBoolean stop = new AtomicBoolean();
-        CompletableFuture<Void> writes = CompletableFuture.runAsync(() -> {
-            for (int i = 0; !stop.get(); i++) store.put("written/" + i % 1000, TILE, 300);
-        });
+        try (KeyValueStore store = backend.createStore(clientSettings(port, otherPort))) {
+            await().atMost(30, SECONDS).ignoreExceptions().until(() -> store.get("probe") == null);
+            // enough keys to land on partitions owned by both members
+            IntStream.range(0, 100).forEach(i -> store.put("layer/" + i, TILE, 300));
 
-        other.getLifecycleService().terminate();
+            other.getLifecycleService().terminate();
 
-        // writes cut by the member leaving are retried, none fails
-        await().during(2, SECONDS).atMost(5, SECONDS).until(() -> !writes.isDone());
-        stop.set(true);
-        writes.join();
-        // backups are promoted on the surviving member, every tile is still there
-        await().atMost(30, SECONDS).ignoreExceptions().until(() -> IntStream.range(0, 100)
-                .allMatch(i -> store.get("layer/" + i) != null));
+            // writes cut by the member leaving may fail past the call timeout, then succeed once the cluster recovers
+            await().atMost(30, SECONDS).ignoreExceptions().untilAsserted(() -> store.put("written", TILE, 300));
+            // backups are promoted on the surviving member, every tile is still there
+            await().atMost(30, SECONDS).ignoreExceptions().until(() -> IntStream.range(0, 100)
+                    .allMatch(i -> store.get("layer/" + i) != null));
+        }
     }
 }

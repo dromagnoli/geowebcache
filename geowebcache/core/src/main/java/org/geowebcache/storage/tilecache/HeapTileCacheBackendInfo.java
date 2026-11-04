@@ -34,4 +34,15 @@ public class HeapTileCacheBackendInfo implements TileCacheBackendInfo {
     public void setMaxSizeMB(int maxSizeMB) {
         this.maxSizeMB = maxSizeMB;
     }
+
+    /** Equal when the effective settings are, an absent value matching its default. */
+    @Override
+    public boolean equals(Object o) {
+        return o instanceof HeapTileCacheBackendInfo other && getMaxSizeMB() == other.getMaxSizeMB();
+    }
+
+    @Override
+    public int hashCode() {
+        return getMaxSizeMB();
+    }
 }

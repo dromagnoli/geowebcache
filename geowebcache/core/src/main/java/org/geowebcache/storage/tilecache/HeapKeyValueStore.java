@@ -64,8 +64,8 @@ public class HeapKeyValueStore implements KeyValueStore {
     }
 
     @Override
-    public boolean remove(String key) {
-        return cache.asMap().remove(key) != null;
+    public void remove(String key) {
+        cache.invalidate(key);
     }
 
     @Override

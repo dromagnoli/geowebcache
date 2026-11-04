@@ -13,14 +13,21 @@
  */
 package org.geowebcache.hazelcast;
 
+import static java.util.concurrent.TimeUnit.SECONDS;
+import static org.awaitility.Awaitility.await;
 import static org.geowebcache.hazelcast.HazelcastTestMembers.CLUSTER;
 import static org.geowebcache.hazelcast.HazelcastTestMembers.NO_FILE;
 import static org.geowebcache.hazelcast.HazelcastTestMembers.freePort;
 import static org.geowebcache.hazelcast.HazelcastTestMembers.xml;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 
+import com.hazelcast.core.Hazelcast;
+import com.hazelcast.core.HazelcastInstance;
+import org.geowebcache.locks.LockProvider.Lock;
 import org.geowebcache.storage.tilecache.AbstractKeyValueStoreTest;
 import org.geowebcache.storage.tilecache.KeyValueStore;
 import org.junit.AfterClass;
@@ -54,6 +61,8 @@ public class HazelcastEmbeddedTileCacheBackendTest extends AbstractKeyValueStore
             </hazelcast>
             """;
 
+    private static final byte[] TILE = {1};
+
     private static HazelcastEmbeddedTileCacheBackend backend;
 
     @BeforeClass
@@ -69,8 +78,31 @@ public class HazelcastEmbeddedTileCacheBackendTest extends AbstractKeyValueStore
     @Override
     protected KeyValueStore createStore() {
         KeyValueStore created = backend.createStore(new HazelcastEmbeddedTileCacheBackendInfo());
-        created.clear();
+        // the member joins in the background, calls fail until then
+        await().atMost(30, SECONDS).ignoreExceptions().untilAsserted(created::clear);
         return created;
+    }
+
+    @Test
+    public void testStoppedMemberStartedAgain() {
+        int port = freePort();
+        String memberXml = MEMBER_XML.formatted(CLUSTER, port);
+        HazelcastEmbeddedTileCacheBackend own = new HazelcastEmbeddedTileCacheBackend(xml(memberXml));
+        try (KeyValueStore restarted = own.createStore(new HazelcastEmbeddedTileCacheBackendInfo())) {
+            await().atMost(30, SECONDS).ignoreExceptions().untilAsserted(() -> restarted.put("key", TILE, 300));
+
+            // as an out of memory error or a cluster shutdown would
+            Hazelcast.getAllHazelcastInstances().stream()
+                    .filter(m -> m.getCluster().getLocalMember().getAddress().getPort() == port)
+                    .forEach(m -> m.getLifecycleService().terminate());
+            IllegalStateException e = assertThrows(IllegalStateException.class, () -> restarted.get("key"));
+            assertThat(e.getMessage(), containsString("stopped"));
+
+            // the same store works again once the new member has joined
+            await().atMost(30, SECONDS).ignoreExceptions().untilAsserted(() -> restarted.put("key", TILE, 300));
+        } finally {
+            own.destroy();
+        }
     }
 
     @Test
@@ -81,6 +113,29 @@ public class HazelcastEmbeddedTileCacheBackendTest extends AbstractKeyValueStore
         IllegalStateException e = assertThrows(IllegalStateException.class, () -> missing.createStore(settings));
 
         assertThat(e.getMessage(), containsString("hazelcast.xml"));
+    }
+
+    @Test
+    public void testLockProviderLocksOnMember() throws Exception {
+        int port = freePort();
+        HazelcastEmbeddedTileCacheBackend own =
+                new HazelcastEmbeddedTileCacheBackend(xml(MEMBER_XML.formatted(CLUSTER, port)));
+        HazelcastLockProvider locks = new HazelcastLockProvider();
+        own.setLockProvider(locks);
+        try (KeyValueStore store = own.createStore(new HazelcastEmbeddedTileCacheBackendInfo())) {
+            await().atMost(30, SECONDS).ignoreExceptions().untilAsserted(store::clear);
+            HazelcastInstance member = Hazelcast.getAllHazelcastInstances().stream()
+                    .filter(m -> m.getCluster().getLocalMember().getAddress().getPort() == port)
+                    .findFirst()
+                    .orElseThrow();
+
+            Lock lock = locks.getLock("key");
+            assertTrue(member.getMap("gwc-tiles.locks").isLocked("key"));
+            lock.release();
+            assertFalse(member.getMap("gwc-tiles.locks").isLocked("key"));
+        } finally {
+            own.destroy();
+        }
     }
 
     @Test

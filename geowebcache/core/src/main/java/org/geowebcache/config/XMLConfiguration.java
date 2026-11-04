@@ -93,6 +93,7 @@ import org.geowebcache.storage.DefaultStorageFinder;
 import org.geowebcache.storage.UnsuitableStorageException;
 import org.geowebcache.storage.tilecache.HeapTileCacheBackendInfo;
 import org.geowebcache.storage.tilecache.TileCacheInfo;
+import org.geowebcache.storage.tilecache.UnresolvedTileCacheBackendInfo;
 import org.geowebcache.util.ApplicationContextProvider;
 import org.geowebcache.util.ExceptionUtils;
 import org.geowebcache.util.URLs;
@@ -385,6 +386,8 @@ public class XMLConfiguration
         xs.alias("blobStores", new ArrayList<BlobStoreInfo>().getClass());
         xs.alias("FileBlobStore", FileBlobStoreInfo.class);
         xs.alias("heapTileCache", HeapTileCacheBackendInfo.class);
+        // a removed backend module must not fail the whole configuration
+        UnresolvedTileCacheBackendInfo.register(xs);
         xs.aliasAttribute(BlobStoreInfo.class, "_default", "default");
         // Alias added to retain XML backwards-compatibility.
         // TODO: Would be nice to be able to use name for consistency

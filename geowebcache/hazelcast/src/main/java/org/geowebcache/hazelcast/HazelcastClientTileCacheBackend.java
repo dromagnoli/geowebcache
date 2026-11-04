@@ -41,9 +41,21 @@ public class HazelcastClientTileCacheBackend implements TileCacheBackend, Dispos
 
     private static final Logger LOGGER = Logging.getLogger(HazelcastClientTileCacheBackend.class.getName());
 
+    /** Shortest wait between two client rebuilds, as lock calls reach {@link #running} without the cache backoff. */
+    private static final long REBUILD_INTERVAL_MILLIS = 30_000;
+
     private final ConfigurationResourceProvider clientXml;
 
-    private HazelcastInstance client;
+    /** The configuration of the first client, reused by its rebuilds, as connection settings apply on restart. */
+    private ClientConfig config;
+
+    /** Null until the first store and once destroyed. Written under the lock only. */
+    private volatile HazelcastInstance client;
+
+    /** Epoch millis before which a stopped client is not rebuilt. */
+    private long rebuildAfter;
+
+    private HazelcastLockProvider lockProvider;
 
     /**
      * Connects as {@code clientXml} says when it exists, replacing every connection setting of
@@ -64,15 +76,58 @@ public class HazelcastClientTileCacheBackend implements TileCacheBackend, Dispos
         return HazelcastClientTileCacheBackendInfo.class;
     }
 
+    /**
+     * Returns a store on the shared client, connecting first if needed. A client that shut down, for example when the
+     * cluster rejected it, is replaced on a later call.
+     */
     @Override
     public synchronized KeyValueStore createStore(TileCacheBackendInfo info) {
         HazelcastClientTileCacheBackendInfo settings = (HazelcastClientTileCacheBackendInfo) info;
-        if (client == null) client = HazelcastClient.newHazelcastClient(clientConfig(settings));
-        return new HazelcastKeyValueStore(client, settings.getMapName());
+        if (client == null) {
+            config = clientConfig(settings);
+            client = HazelcastClient.newHazelcastClient(config);
+        }
+        String mapName = settings.getMapName();
+        // closed when the cache settings change, so a switch to another backend stops the cluster locks
+        Runnable stopLocking = lockProvider == null ? () -> {} : lockProvider.lockOn(this::running, mapName);
+        return new HazelcastKeyValueStore(this::running, mapName, stopLocking);
     }
 
-    private ClientConfig clientConfig(HazelcastClientTileCacheBackendInfo settings) {
+    /** The running client; lock free on this path, as every cache call goes through it. */
+    private HazelcastInstance running() {
+        HazelcastInstance current = client;
+        if (current == null) throw new IllegalStateException("Hazelcast client shut down");
+        // retrying forever, a client only stops when the cluster rejects it or on an internal error
+        if (current.getLifecycleService().isRunning()) return current;
+        rebuild(current);
+        throw new IllegalStateException("Hazelcast client stopped, connecting again");
+    }
+
+    /** Replaces {@code stopped} unless another call already did, the backend was destroyed, or it is too soon. */
+    private synchronized void rebuild(HazelcastInstance stopped) {
+        long now = System.currentTimeMillis();
+        if (client != stopped || now < rebuildAfter) return;
+        rebuildAfter = now + REBUILD_INTERVAL_MILLIS;
+        LOGGER.warning("Hazelcast tile cache client stopped, starting a new one");
+        client = HazelcastClient.newHazelcastClient(config);
+    }
+
+    /** Makes {@code lockProvider} lock on the client of the stores created from now on. */
+    public synchronized void setLockProvider(HazelcastLockProvider lockProvider) {
+        this.lockProvider = lockProvider;
+    }
+
+    /** The client configuration, with the tile cache defaults filled in where the file leaves Hazelcast's own. */
+    ClientConfig clientConfig(HazelcastClientTileCacheBackendInfo settings) {
         ClientConfig config = clientXml.hasInput() ? readClientXml() : fromSettings(settings);
+
+        // cache calls run under the blob store lock, give up in seconds instead of the default 120
+        String timeout = ClientProperty.INVOCATION_TIMEOUT_SECONDS.getName();
+        if (config.getProperty(timeout) == null) config.setProperty(timeout, "5");
+
+        // members drop backup acks for a client not connected to them, which then waits 5 s for each write, past the
+        // call timeout: have the owner member collect the acks instead, always, as the file cannot tell it was unset
+        config.setBackupAckToClientEnabled(false);
 
         // connect in the background and fail calls while offline, the cache is built under the blob store lock
         ClientConnectionStrategyConfig strategy = config.getConnectionStrategyConfig();
@@ -85,6 +140,11 @@ public class HazelcastClientTileCacheBackend implements TileCacheBackend, Dispos
                     + " the tile cache client retries forever");
         }
         retry.setClusterConnectTimeoutMillis(-1);
+
+        // Hazelcast's multiplier 1.05 without jitter has every node retry in lockstep, kept only when the file sets it
+        ConnectionRetryConfig defaults = new ConnectionRetryConfig();
+        if (retry.getMultiplier() == defaults.getMultiplier()) retry.setMultiplier(2);
+        if (retry.getJitter() == defaults.getJitter()) retry.setJitter(0.2);
         return config;
     }
 
@@ -102,15 +162,6 @@ public class HazelcastClientTileCacheBackend implements TileCacheBackend, Dispos
         config.getNetworkConfig().setAddresses(List.of(settings.getMembers().split("\\s*,\\s*")));
         // retry writes cut by a member leaving too, as reads are: puts and removals can safely run twice
         config.getNetworkConfig().setRedoOperation(true);
-        // cache calls run under the blob store lock, give up in seconds instead of the default 120
-        config.setProperty(ClientProperty.INVOCATION_TIMEOUT_SECONDS.getName(), "5");
-
-        ConnectionRetryConfig retry = config.getConnectionStrategyConfig().getConnectionRetryConfig();
-        retry.setInitialBackoffMillis(1000);
-        retry.setMaxBackoffMillis(30_000);
-        retry.setMultiplier(2);
-        // spreads the reconnects of many nodes after an outage
-        retry.setJitter(0.2);
         return config;
     }
 
