@@ -104,6 +104,8 @@
     <constructor-arg ref="gwcXmlConfig"/>
   </bean>
 
+  <bean id="gwcHeapTileCacheBackend" class="org.geowebcache.storage.tilecache.HeapTileCacheBackend"/>
+
   <bean id="gwcTransientCache" class="org.geowebcache.storage.TransientCache" >
     <description>
       In memory cache used when MetaTiling tiles that are published but not cached to disk.

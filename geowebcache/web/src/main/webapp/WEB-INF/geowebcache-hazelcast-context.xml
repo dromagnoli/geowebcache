@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE beans PUBLIC "-//SPRING//DTD BEAN//EN" "http://www.springframework.org/dtd/spring-beans.dtd">
+<beans>
+  <description>
+   Bean configuration file for the gwc-hazelcast module
+  </description>
+
+  <bean id="HazelcastTileCacheConfigProvider" class="org.geowebcache.hazelcast.HazelcastTileCacheConfigProvider">
+    <description>
+      Contributes XStream configuration settings to org.geowebcache.config.XMLConfiguration to encode the Hazelcast tile cache backend settings
+    </description>
+  </bean>
+
+  <!-- Both backends are idle until the tileCache backend of geowebcache.xml selects one of them -->
+  <bean id="gwcHazelcastClientTileCacheBackend" class="org.geowebcache.hazelcast.HazelcastClientTileCacheBackend">
+    <constructor-arg>
+      <bean class="org.geowebcache.config.XMLFileResourceProvider">
+        <constructor-arg value="hazelcast-client.xml"/>
+        <constructor-arg ref="gwcAppCtx"/>
+        <constructor-arg ref="gwcDefaultStorageFinder"/>
+      </bean>
+    </constructor-arg>
+  </bean>
+
+  <bean id="gwcHazelcastEmbeddedTileCacheBackend" class="org.geowebcache.hazelcast.HazelcastEmbeddedTileCacheBackend">
+    <constructor-arg>
+      <bean class="org.geowebcache.config.XMLFileResourceProvider">
+        <constructor-arg value="hazelcast.xml"/>
+        <constructor-arg ref="gwcAppCtx"/>
+        <constructor-arg ref="gwcDefaultStorageFinder"/>
+      </bean>
+    </constructor-arg>
+  </bean>
+</beans>
