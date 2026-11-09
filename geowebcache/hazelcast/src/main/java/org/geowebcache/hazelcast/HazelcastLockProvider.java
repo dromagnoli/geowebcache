@@ -29,8 +29,9 @@ import org.geowebcache.locks.MemoryLockProvider;
 
 /**
  * {@link LockProvider} shared by every node of the Hazelcast tile cache, so a metatile is rendered once in the cluster.
- * When the cluster cannot be reached, or a lock is not acquired in time, it falls back to a local lock: the worst case
- * is a tile rendered once per node, never a failed request. A lock must be released by the thread that acquired it.
+ * When the cluster cannot be reached, the tile cache finds it down, or a lock is not acquired in time, it falls back to
+ * a local lock: the worst case is a tile rendered once per node, never a failed request. A lock must be released by the
+ * thread that acquired it.
  */
 public class HazelcastLockProvider implements LockProvider {
 
@@ -43,8 +44,8 @@ public class HazelcastLockProvider implements LockProvider {
     /** Seconds to wait for a lock, also the lease freeing a lock its holder never released. */
     private final int timeout;
 
-    /** The map to lock on, null while no store of a Hazelcast tile cache backend is in use. */
-    private final AtomicReference<Supplier<IMap<String, Object>>> locks = new AtomicReference<>();
+    /** Where to lock, null while no store of a Hazelcast tile cache backend is in use. */
+    private final AtomicReference<Target> locks = new AtomicReference<>();
 
     /** Waits for a lock, and keeps it at most, {@link LockProvider#GWC_LOCK_TIMEOUT} seconds. */
     public HazelcastLockProvider() {
@@ -56,22 +57,43 @@ public class HazelcastLockProvider implements LockProvider {
     }
 
     /**
-     * Locks on {@code instance} from now on, in a map named after the tile map. Returns the action going back to local
-     * locks, doing nothing once another call took over.
+     * Locks on {@code instance} from now on, in a map named after the tile map, until the returned target stops or
+     * another call takes over.
      */
-    Runnable lockOn(Supplier<HazelcastInstance> instance, String tileMap) {
+    Target lockOn(Supplier<HazelcastInstance> instance, String tileMap) {
         // map locks create no entries, so this map needs no declaration on the cluster
         String name = tileMap + ".locks";
-        Supplier<IMap<String, Object>> target = () -> instance.get().getMap(name);
+        Target target = new Target(() -> instance.get().getMap(name));
         locks.set(target);
         warnedNoCluster.set(false);
-        return () -> locks.compareAndSet(target, null);
+        return target;
+    }
+
+    /** The lock map of one tile cache store, skipped while the cache finds that store unreachable. */
+    public final class Target {
+
+        private final Supplier<IMap<String, Object>> map;
+
+        private volatile boolean reachable = true;
+
+        private Target(Supplier<IMap<String, Object>> map) {
+            this.map = map;
+        }
+
+        void reachable(boolean reachable) {
+            this.reachable = reachable;
+        }
+
+        /** Back to local locks, unless another store took over. */
+        void stop() {
+            locks.compareAndSet(this, null);
+        }
     }
 
     /** {@inheritDoc} */
     @Override
     public Lock getLock(String lockKey) throws GeoWebCacheException {
-        Supplier<IMap<String, Object>> current = locks.get();
+        Target current = locks.get();
         if (current == null) {
             if (warnedNoCluster.compareAndSet(false, true)) {
                 LOGGER.warning("Hazelcast locking needs the tile cache enabled with a Hazelcast backend,"
@@ -79,8 +101,10 @@ public class HazelcastLockProvider implements LockProvider {
             }
             return local.getLock(lockKey);
         }
+        // the cache logged the outage already, and waiting on a silent cluster would cost every metatile a timeout
+        if (!current.reachable) return local.getLock(lockKey);
         try {
-            IMap<String, Object> map = current.get();
+            IMap<String, Object> map = current.map.get();
             // map locks rather than the CP FencedLock, which has no consistency guarantee without CP members
             if (map.tryLock(lockKey, timeout, SECONDS, timeout, SECONDS)) return () -> release(map, lockKey);
         } catch (InterruptedException e) {

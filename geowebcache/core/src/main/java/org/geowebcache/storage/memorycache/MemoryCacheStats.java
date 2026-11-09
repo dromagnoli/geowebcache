@@ -11,7 +11,7 @@
  *
  * <p>Copyright 2026
  */
-package org.geowebcache.storage.tilecache;
+package org.geowebcache.storage.memorycache;
 
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
@@ -27,9 +27,9 @@ import java.util.logging.Logger;
 import org.geotools.util.logging.Logging;
 
 /** Per-layer read results and failed puts, logged at INFO and reset by the first {@link #report()} of each interval. */
-class TileCacheStats {
+class MemoryCacheStats {
 
-    private static final Logger LOGGER = Logging.getLogger(TileCacheStats.class.getName());
+    private static final Logger LOGGER = Logging.getLogger(MemoryCacheStats.class.getName());
 
     /** Outcome of a tile read. */
     enum Result {
@@ -57,7 +57,7 @@ class TileCacheStats {
     private final LayerStats discarded = new LayerStats();
 
     /** No report is ever logged with an interval of 0. */
-    TileCacheStats(long intervalSeconds, Ticker ticker) {
+    MemoryCacheStats(long intervalSeconds, Ticker ticker) {
         this.intervalNanos = SECONDS.toNanos(intervalSeconds);
         this.ticker = ticker;
         this.nextReport = new AtomicLong(ticker.read() + intervalNanos);

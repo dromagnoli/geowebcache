@@ -11,7 +11,7 @@
  *
  * <p>Copyright 2026
  */
-package org.geowebcache.storage.tilecache;
+package org.geowebcache.storage.memorycache;
 
 import com.thoughtworks.xstream.XStream;
 import com.thoughtworks.xstream.converters.Converter;
@@ -35,7 +35,7 @@ import java.util.Objects;
  * Backend settings whose class is unknown, as when the backend module was removed: the cache is unusable, and the
  * settings are saved back as they were read, so that reinstalling the module restores them.
  */
-public class UnresolvedTileCacheBackendInfo implements TileCacheBackendInfo {
+public class UnresolvedKeyValueStoreInfo implements KeyValueStoreInfo {
 
     @Serial
     private static final long serialVersionUID = 1L;
@@ -47,7 +47,7 @@ public class UnresolvedTileCacheBackendInfo implements TileCacheBackendInfo {
     /** The whole {@code <backend>} element. */
     private final String xml;
 
-    UnresolvedTileCacheBackendInfo(String alias, String xml) {
+    UnresolvedKeyValueStoreInfo(String alias, String xml) {
         this.alias = alias;
         this.xml = xml;
     }
@@ -57,10 +57,16 @@ public class UnresolvedTileCacheBackendInfo implements TileCacheBackendInfo {
         return alias;
     }
 
+    /** Always fails, as the class of these settings is not installed. */
+    @Override
+    public KeyValueStore createStore() {
+        throw new IllegalStateException("Backend " + alias + " is not installed");
+    }
+
     /** Equal when both hold the same backend element. */
     @Override
     public boolean equals(Object o) {
-        return o instanceof UnresolvedTileCacheBackendInfo other && xml.equals(other.xml);
+        return o instanceof UnresolvedKeyValueStoreInfo other && xml.equals(other.xml);
     }
 
     @Override
@@ -68,28 +74,30 @@ public class UnresolvedTileCacheBackendInfo implements TileCacheBackendInfo {
         return Objects.hash(xml);
     }
 
-    /** Lets {@code xs} read {@code <tileCache>} with an unknown backend instead of failing the whole configuration. */
+    /**
+     * Lets {@code xs} read {@code <memoryCache>} with an unknown backend instead of failing the whole configuration.
+     */
     public static void register(XStream xs) {
         // an unknown class attribute fails in the reflection converter, before any converter of the field runs, so
-        // TileCacheInfo gets a reflection converter of its own resolving it to this class
+        // MemoryCacheInfo gets a reflection converter of its own resolving it to this class
         Mapper mapper = new MapperWrapper(xs.getMapper()) {
             @Override
             public Class realClass(String elementName) {
                 try {
                     return super.realClass(elementName);
                 } catch (CannotResolveClassException e) {
-                    return UnresolvedTileCacheBackendInfo.class;
+                    return UnresolvedKeyValueStoreInfo.class;
                 }
             }
 
             // no class attribute written for this class, the converter writes the original one
             @Override
             public Class defaultImplementationOf(Class type) {
-                if (type == TileCacheBackendInfo.class) return UnresolvedTileCacheBackendInfo.class;
+                if (type == KeyValueStoreInfo.class) return UnresolvedKeyValueStoreInfo.class;
                 return super.defaultImplementationOf(type);
             }
         };
-        xs.registerConverter(new ReflectionConverter(mapper, xs.getReflectionProvider(), TileCacheInfo.class));
+        xs.registerConverter(new ReflectionConverter(mapper, xs.getReflectionProvider(), MemoryCacheInfo.class));
         xs.registerConverter(new RawConverter());
     }
 
@@ -98,7 +106,7 @@ public class UnresolvedTileCacheBackendInfo implements TileCacheBackendInfo {
 
         @Override
         public boolean canConvert(Class type) {
-            return type == UnresolvedTileCacheBackendInfo.class;
+            return type == UnresolvedKeyValueStoreInfo.class;
         }
 
         @Override
@@ -108,12 +116,12 @@ public class UnresolvedTileCacheBackendInfo implements TileCacheBackendInfo {
             new HierarchicalStreamCopier().copy(reader, writer);
             // the writer buffers
             writer.flush();
-            return new UnresolvedTileCacheBackendInfo(reader.getAttribute(CLASS), xml.toString());
+            return new UnresolvedKeyValueStoreInfo(reader.getAttribute(CLASS), xml.toString());
         }
 
         @Override
         public void marshal(Object source, HierarchicalStreamWriter writer, MarshallingContext context) {
-            UnresolvedTileCacheBackendInfo info = (UnresolvedTileCacheBackendInfo) source;
+            UnresolvedKeyValueStoreInfo info = (UnresolvedKeyValueStoreInfo) source;
             HierarchicalStreamReader reader = new DomDriver().createReader(new StringReader(info.xml));
             if (info.alias != null) writer.addAttribute(CLASS, info.alias);
             HierarchicalStreamCopier copier = new HierarchicalStreamCopier();

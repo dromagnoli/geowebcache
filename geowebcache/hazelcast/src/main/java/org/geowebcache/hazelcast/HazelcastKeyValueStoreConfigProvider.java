@@ -18,16 +18,16 @@ import org.geowebcache.config.Info;
 import org.geowebcache.config.XMLConfigurationProvider;
 
 /** Maps the Hazelcast backend settings to their {@code <backend class="...">} name in {@code geowebcache.xml}. */
-public class HazelcastTileCacheConfigProvider implements XMLConfigurationProvider {
+public class HazelcastKeyValueStoreConfigProvider implements XMLConfigurationProvider {
 
     @Override
     public XStream getConfiguredXStream(XStream xs) {
-        xs.alias("hazelcastClientTileCache", HazelcastClientTileCacheBackendInfo.class);
-        xs.alias("hazelcastEmbeddedTileCache", HazelcastEmbeddedTileCacheBackendInfo.class);
+        xs.alias("hazelcastClientKeyValueStore", HazelcastClientKeyValueStoreInfo.class);
+        xs.alias("hazelcastEmbeddedKeyValueStore", HazelcastEmbeddedKeyValueStoreInfo.class);
         return xs;
     }
 
-    /** Backend settings are saved with {@code <tileCache>}, never as a standalone info. */
+    /** Backend settings are saved with {@code <memoryCache>}, never as a standalone info. */
     @Override
     public boolean canSave(Info i) {
         return false;

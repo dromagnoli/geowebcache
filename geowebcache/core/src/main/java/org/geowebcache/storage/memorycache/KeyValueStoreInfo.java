@@ -11,23 +11,16 @@
  *
  * <p>Copyright 2026
  */
-package org.geowebcache.storage.tilecache;
+package org.geowebcache.storage.memorycache;
 
-/** {@link TileCacheBackend} keeping tiles in the heap of each node, not shared with other nodes. */
-public class HeapTileCacheBackend implements TileCacheBackend {
+import java.io.Serializable;
 
-    @Override
-    public String getId() {
-        return "heap";
-    }
+/**
+ * Settings of one cache backend, persisted as the {@code <backend>} of {@code <memoryCache>}, and the factory of its
+ * {@link KeyValueStore}; each implementation needs an XStream alias, registered by its module.
+ */
+public interface KeyValueStoreInfo extends Serializable {
 
-    @Override
-    public Class<HeapTileCacheBackendInfo> getSettingsClass() {
-        return HeapTileCacheBackendInfo.class;
-    }
-
-    @Override
-    public KeyValueStore createStore(TileCacheBackendInfo info) {
-        return new HeapKeyValueStore(((HeapTileCacheBackendInfo) info).getMaxSizeMB() * 1024L * 1024L);
-    }
+    /** Returns a new store for these settings; the caller closes it. */
+    KeyValueStore createStore();
 }

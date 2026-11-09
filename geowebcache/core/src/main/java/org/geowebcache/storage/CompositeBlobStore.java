@@ -40,8 +40,8 @@ import org.geowebcache.layer.TileLayer;
 import org.geowebcache.layer.TileLayerDispatcher;
 import org.geowebcache.locks.LockProvider;
 import org.geowebcache.storage.blobstore.file.FileBlobStore;
-import org.geowebcache.storage.tilecache.TileCache;
-import org.geowebcache.storage.tilecache.TileCacheInfo;
+import org.geowebcache.storage.memorycache.MemoryCache;
+import org.geowebcache.storage.memorycache.MemoryCacheInfo;
 
 /**
  * A composite {@link BlobStore} that multiplexes tile operations to configured blobstores based on
@@ -83,7 +83,7 @@ public class CompositeBlobStore implements BlobStore, BlobStoreConfigurationList
 
     private final ServerConfiguration serverConfiguration;
 
-    private volatile TileCache tileCache;
+    private volatile MemoryCache memoryCache;
 
     @VisibleForTesting
     static final class LiveStore {
@@ -196,7 +196,7 @@ public class CompositeBlobStore implements BlobStore, BlobStoreConfigurationList
     @Override
     public synchronized void destroy() {
         destroy(blobStores);
-        if (tileCache != null) tileCache.close();
+        if (memoryCache != null) memoryCache.close();
     }
 
     private void destroy(Map<String, LiveStore> blobStores) {
@@ -255,7 +255,7 @@ public class CompositeBlobStore implements BlobStore, BlobStoreConfigurationList
                 }
             }
             // even when no store had tiles, as with passthrough off they are all in the cache
-            tileCache().layerRenamed(oldLayerName, newLayerName);
+            memoryCache().layerRenamed(oldLayerName, newLayerName);
             return renamed;
         });
     }
@@ -292,22 +292,22 @@ public class CompositeBlobStore implements BlobStore, BlobStoreConfigurationList
             throw new StorageException("Attempted to use a blob store that's disabled: " + store.config.getName());
         }
 
-        return tileCache().wrap(layer, store.liveInstance);
+        return memoryCache().wrap(layer, store.liveInstance);
     }
 
     /** The cache for the current settings, rebuilt when they change, closing the previous one. */
-    private TileCache tileCache() {
+    private MemoryCache memoryCache() {
         // a reload replaces the settings with equal ones, which must keep the cached tiles and the connection;
         // Objects.equals checks identity first, so the per-request check stays cheap
-        TileCacheInfo info = serverConfiguration.getTileCache();
-        TileCache cache = tileCache;
+        MemoryCacheInfo info = serverConfiguration.getMemoryCache();
+        MemoryCache cache = memoryCache;
         if (cache != null && Objects.equals(cache.getInfo(), info)) return cache;
         synchronized (this) {
-            TileCache previous = tileCache;
+            MemoryCache previous = memoryCache;
             if (previous != null && Objects.equals(previous.getInfo(), info)) return previous;
-            tileCache = new TileCache(info, layers);
+            memoryCache = new MemoryCache(info, layers);
             if (previous != null) previous.close();
-            return tileCache;
+            return memoryCache;
         }
     }
 

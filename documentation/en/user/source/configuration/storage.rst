@@ -519,31 +519,33 @@ expire quickly and are requested by many clients at once, where reading each til
 rendering time saved. In particular, it allows to share the tiles among all the nodes of a cluster, so that a tile rendered by one
 node is served by every other node until it expires.
 
-The cache is configured once in :file:`geowebcache.xml`, with the ``tileCache`` element after ``blobStores``, and used by the layers
-that set ``memoryCached`` to ``true``. For example:
+The cache is configured once in :file:`geowebcache.xml`, with the ``memoryCache`` element after ``blobStores``, or through the
+:ref:`REST API <rest.memorycache>`, and used by the layers that set ``memoryCached`` to ``true``. For example:
 
 .. code-block:: xml
 
-    <tileCache>
+    <memoryCache>
       <enabled>true</enabled>
       <timeToLive>300</timeToLive>
       <passthrough>true</passthrough>
       <statsInterval>300</statsInterval>
-      <backend class="heapTileCache">
+      <backend class="heapKeyValueStore">
         <maxSizeMB>64</maxSizeMB>
       </backend>
-    </tileCache>
+    </memoryCache>
 
 * **enabled**: whether the cache is used, defaults to ``false``.
 * **timeToLive**: seconds a tile stays in the cache when its layer sets no ``expireCache``, defaults to 300. A layer ``expireCache``
-  applies instead, whether shorter or longer.
+  applies instead, whether shorter or longer. A tile read from the blob store with passthrough on is kept for what is left of
+  the layer ``expireCache``, and at most ``timeToLive``, so that a read racing a truncate cannot bring back a removed tile for
+  longer than that.
 * **passthrough**: whether tiles are also written to, and read from, the blob store. Defaults to ``true``. When ``false``, tiles live in
   the cache only, and an expired or evicted tile is rendered again. Truncating a tile, an area or a gridset then leaves the blob store
   alone, so tiles it still holds from before are kept: truncate the whole layer before turning ``passthrough`` back on.
 * **statsInterval**: seconds between two statistics lines per layer in the log, defaults to 300. ``0`` turns them off.
-* **backend**: where the tiles are kept, named by the ``class`` attribute. Defaults to ``heapTileCache``. When the module of the backend
-  is removed, GeoWebCache still starts: the cache is unusable, with the reason in the log, and the backend settings are kept as they are,
-  so that installing the module again restores them.
+* **backend**: where the tiles are kept, named by the ``class`` attribute. Defaults to ``heapKeyValueStore``. When the module of the backend
+  is removed, GeoWebCache still starts: the cache is unusable, with the reason in the log, truncates run on the blob store only, and the
+  backend settings are kept as they are, so that installing the module again restores them.
 
 Each layer opts in with ``memoryCached``, off by default, placed before the layer ``name``:
 
@@ -555,9 +557,9 @@ Each layer opts in with ``memoryCached``, off by default, placed before the laye
       ...
     </wmsLayer>
 
-**Nodes sharing one** :file:`geowebcache.xml` **read the** ``tileCache`` **settings when they start or reload**: after changing them,
+**Nodes sharing one** :file:`geowebcache.xml` **read the** ``memoryCache`` **settings when they start or reload**: after changing them,
 reload or restart every other node. It is to be noted that until then, another node saving its configuration (a blob store or a
-gridset change) writes its old ``tileCache`` settings back over the change.
+gridset change) writes its old ``memoryCache`` settings back over the change.
 
 Layer metadata and parameter mappings always stay in the blob store. The cache only holds tiles.
 
@@ -566,10 +568,17 @@ it comes back. A tile request never fails because of the cache. While the cache 
 tries it again from time to time, from every second at the start of the outage up to every 30 seconds for long ones. A cache that keeps
 going down and up again is reported once with its error, then with a short "unreachable again" line each time.
 
+A truncate of a layer using the cache removes its tiles from both the cache and the blob store. **While the cache is down, or when it
+fails to remove the tiles, the truncate is not run at all**, blob store included, and reports an error: retry it once the cache is back,
+since the tiles cached before the outage are served again when it recovers. This applies to the disk quota deletes too, which fail until
+the cache is back. If the cache fails only after the blob store was truncated, an error is reported and cached tiles may stay stale up to
+their time to live. Removing a layer always deletes its tiles from the blob store, even with the cache down; its cached tiles then expire
+with their time to live. Layers not using the cache are truncated in the blob store as usual, whatever the state of the cache.
+
 Heap backend
 ++++++++++++
 
-The ``heapTileCache`` backend keeps tiles in the memory of each node, **not shared** with other nodes. ``maxSizeMB`` (defaults to 64)
+The ``heapKeyValueStore`` backend keeps tiles in the memory of each node, **not shared** with other nodes. ``maxSizeMB`` (defaults to 64)
 bounds the memory used, the least used tiles are dropped first.
 
 Hazelcast backends
@@ -577,9 +586,9 @@ Hazelcast backends
 
 The Hazelcast backends keep tiles in a `Hazelcast <https://hazelcast.com/>`_ map, shared by all the nodes. There are two of them:
 
-* ``hazelcastClientTileCache`` connects to a separate Hazelcast cluster, which holds the tiles. Nodes stay small and stateless, and the
+* ``hazelcastClientKeyValueStore`` connects to a separate Hazelcast cluster, which holds the tiles. Nodes stay small and stateless, and the
   cluster is sized and restarted on its own.
-* ``hazelcastEmbeddedTileCache`` makes each node a member of the cluster, holding a share of the tiles in its own memory. There is no
+* ``hazelcastEmbeddedKeyValueStore`` makes each node a member of the cluster, holding a share of the tiles in its own memory. There is no
   separate service to run, at the cost of a larger memory footprint per node.
 
 **Hazelcast open source has no authentication nor encryption**. The cluster must only be reachable from the GeoWebCache nodes, for example
@@ -590,7 +599,7 @@ Client backend
 
 .. code-block:: xml
 
-    <backend class="hazelcastClientTileCache">
+    <backend class="hazelcastClientKeyValueStore">
       <clusterName>dev</clusterName>
       <members>hazelcast-1:5701, hazelcast-2:5701</members>
       <mapName>gwc-tiles</mapName>
@@ -605,7 +614,11 @@ Client backend
 connection until GeoWebCache stops. Saving new values, or reloading the configuration, does not change it. ``mapName`` applies on save.
 
 GeoWebCache starts even when the cluster is down. Tiles are then served without the cache, and the client keeps trying to connect in the
-background, waiting up to 30 seconds between attempts. A request waits at most 5 seconds for an answer from the cluster.
+background, waiting up to 30 seconds between attempts. Reading or writing a tile gives up after 2 seconds, and the cache is then treated
+as down; each cluster call of a truncate gives up after 10 seconds, and the truncate then reports an error. The limits can be changed with
+the ``GWC_MEMORYCACHE_CALL_TIMEOUT`` and ``GWC_MEMORYCACHE_BULK_TIMEOUT`` system properties, servlet context parameters or environment
+variables, in milliseconds. Copying a tile read from the blob store into the cache, with passthrough on, and the cluster-wide locks have
+no such limit: on a member that stops answering they wait until the connection is declared dead, 60 seconds by default.
 
 For settings not covered above, such as discovery or timeouts, a :file:`hazelcast-client.xml` file can be placed in the same directory as
 :file:`geowebcache.xml`. When present, it **replaces** ``clusterName``, ``members`` and the connection defaults, following the
@@ -621,7 +634,7 @@ Embedded backend
 
 .. code-block:: xml
 
-    <backend class="hazelcastEmbeddedTileCache">
+    <backend class="hazelcastEmbeddedKeyValueStore">
       <mapName>gwc-tiles</mapName>
     </backend>
 
@@ -671,8 +684,52 @@ The time to live does not need to be declared, as each tile is stored with its o
 ``backup-count`` sets how many other members keep a copy of each tile. With ``1``, losing a member loses no tiles, at the cost of twice
 the memory. With ``0``, tiles of a lost member are rendered again.
 
+The first truncate adds a sorted index on the map keys, so that removing the tiles of a layer, gridset or parameter set looks up the
+matching keys instead of reading every tile on the members. The index costs some memory per tile on the members and a little time on
+every write, so size the members for it: an entry count limit does not account for it. To keep the cluster configuration under your
+control, declare it with the map instead:
+
+.. code-block:: xml
+
+    <map name="gwc-tiles">
+      <indexes>
+        <index type="SORTED">
+          <attributes>
+            <attribute>__key</attribute>
+          </attributes>
+        </index>
+      </indexes>
+    </map>
+
+An index added by GeoWebCache is lost when the whole cluster restarts, and added again by the next truncate. If it cannot be added, for
+example when the cluster configuration refuses it, truncates still run without it, reading every tile on the members, with a warning in
+the log, and the next truncate tries again.
+
 Truncating a bounding box reads the keys of each affected zoom level, for one parameter set and format, into the memory of the node doing
 it, and removes the tiles inside the box. **Above 100,000 tiles in a zoom level it removes the whole zoom level instead**, with a line in
 the log, so that the node memory stays bounded: the extra tiles are rendered again when requested. The limit can be changed with the
-``GWC_TILECACHE_MATCHING_LIMIT`` system property, servlet context parameter or environment variable, ``0`` always removing the whole
+``GWC_MEMORYCACHE_MATCHING_LIMIT`` system property, servlet context parameter or environment variable, ``0`` always removing the whole
 zoom level; it applies when the cache settings are next saved or on restart.
+
+Cluster-wide tile locks
+~~~~~~~~~~~~~~~~~~~~~~~
+
+When a tile is missing, a node renders its whole metatile, and other requests for the same metatile on that node wait for it. Separate
+nodes do not: when several of them miss the same metatile at once, for example right after its tiles expired, each of them renders it.
+With a Hazelcast backend, the nodes can lock on the cluster instead, so that one node renders the metatile and the others wait, then serve
+its tiles from the shared cache. Name ``hazelcastLock`` as the lock provider in :file:`geowebcache.xml`, after ``backendTimeout``:
+
+.. code-block:: xml
+
+    <backendTimeout>120</backendTimeout>
+    <lockProvider>hazelcastLock</lockProvider>
+
+* **It needs the cache enabled with a Hazelcast backend**, as the locks are kept on the same cluster, in a map named after the tile map
+  with a ``.locks`` suffix, ``gwc-tiles.locks`` by default, which needs no declaration. Otherwise each node locks on its own, with a
+  warning in the log. Switching the cache to another backend takes the nodes back to their own locks as soon as the settings are saved.
+* A node never fails a request because of these locks. When the cluster cannot be reached, or while the cache considers it down after a
+  failed call, nodes lock on their own at once until it is back, and a metatile may then be rendered once per node. A node waits for a lock at most the number of seconds set by the ``GWC_LOCK_TIMEOUT``
+  system property, 120 by default, then goes on anyway with a warning in the log. A node stopping while it holds a lock keeps it at most
+  that long.
+* It is to be noted that the blob stores use the same lock provider. **The S3 blob store holds a lock for the whole of a bulk delete**,
+  often longer than ``GWC_LOCK_TIMEOUT``, so the lock can expire under it and another node can start the same delete meanwhile.

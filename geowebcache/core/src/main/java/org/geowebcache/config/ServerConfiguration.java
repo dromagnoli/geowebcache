@@ -16,7 +16,7 @@ package org.geowebcache.config;
 import java.io.IOException;
 import org.geowebcache.config.meta.ServiceInformation;
 import org.geowebcache.locks.LockProvider;
-import org.geowebcache.storage.tilecache.TileCacheInfo;
+import org.geowebcache.storage.memorycache.MemoryCacheInfo;
 
 /**
  * Interface for managing global server configuration information.
@@ -57,7 +57,7 @@ public interface ServerConfiguration extends BaseConfiguration {
     void setLockProvider(LockProvider lockProvider) throws IOException;
 
     /** The tile cache settings, or null when this configuration does not hold them. */
-    default TileCacheInfo getTileCache() {
+    default MemoryCacheInfo getMemoryCache() {
         return null;
     }
 

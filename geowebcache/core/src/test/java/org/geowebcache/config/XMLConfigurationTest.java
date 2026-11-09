@@ -76,9 +76,9 @@ import org.geowebcache.grid.SRS;
 import org.geowebcache.layer.TileLayer;
 import org.geowebcache.layer.wms.WMSLayer;
 import org.geowebcache.storage.UnsuitableStorageException;
-import org.geowebcache.storage.tilecache.HeapTileCacheBackendInfo;
-import org.geowebcache.storage.tilecache.TileCacheInfo;
-import org.geowebcache.storage.tilecache.UnresolvedTileCacheBackendInfo;
+import org.geowebcache.storage.memorycache.HeapKeyValueStoreInfo;
+import org.geowebcache.storage.memorycache.MemoryCacheInfo;
+import org.geowebcache.storage.memorycache.UnresolvedKeyValueStoreInfo;
 import org.geowebcache.util.TestUtils;
 import org.junit.Assume;
 import org.junit.Before;
@@ -801,55 +801,55 @@ public class XMLConfigurationTest {
     }
 
     @Test
-    public void testTileCacheAbsentByDefault() {
-        assertNull(config.getTileCache());
+    public void testMemoryCacheAbsentByDefault() {
+        assertNull(config.getMemoryCache());
         WMSLayer layer = (WMSLayer)
                 config.getLayer(config.getLayerNames().iterator().next()).get();
         assertFalse(layer.isMemoryCached());
     }
 
     @Test
-    public void testSaveTileCache() throws Exception {
-        HeapTileCacheBackendInfo heap = new HeapTileCacheBackendInfo();
+    public void testSaveMemoryCache() throws Exception {
+        HeapKeyValueStoreInfo heap = new HeapKeyValueStoreInfo();
         heap.setMaxSizeMB(128);
-        TileCacheInfo tileCache = new TileCacheInfo();
-        tileCache.setEnabled(true);
-        tileCache.setTimeToLive(120);
-        tileCache.setPassthrough(false);
-        tileCache.setStatsInterval(60);
-        tileCache.setBackend(heap);
+        MemoryCacheInfo memoryCache = new MemoryCacheInfo();
+        memoryCache.setEnabled(true);
+        memoryCache.setTimeToLive(120);
+        memoryCache.setPassthrough(false);
+        memoryCache.setStatsInterval(60);
+        memoryCache.setBackend(heap);
 
-        config.setTileCache(tileCache);
+        config.setMemoryCache(memoryCache);
 
         assertValidAgainstSchema();
-        TileCacheInfo reloaded = reload().getTileCache();
+        MemoryCacheInfo reloaded = reload().getMemoryCache();
         assertTrue(reloaded.isEnabled());
         assertEquals(120, reloaded.getTimeToLive());
         assertFalse(reloaded.isPassthrough());
         assertEquals(60, reloaded.getStatsInterval());
-        assertEquals(128, ((HeapTileCacheBackendInfo) reloaded.getBackend()).getMaxSizeMB());
+        assertEquals(128, ((HeapKeyValueStoreInfo) reloaded.getBackend()).getMaxSizeMB());
     }
 
     @Test
     public void testUnknownBackendKeptAsIs() throws Exception {
-        TileCacheInfo tileCache = new TileCacheInfo();
-        tileCache.setEnabled(true);
-        tileCache.setBackend(new HeapTileCacheBackendInfo());
-        config.setTileCache(tileCache);
+        MemoryCacheInfo memoryCache = new MemoryCacheInfo();
+        memoryCache.setEnabled(true);
+        memoryCache.setBackend(new HeapKeyValueStoreInfo());
+        config.setMemoryCache(memoryCache);
         // as left by a removed backend module
         String xml = Files.readString(configFile.toPath())
                 .replaceAll(
-                        "(?s)<backend class=\"heapTileCache\"(/>|>.*?</backend>)",
+                        "(?s)<backend class=\"heapKeyValueStore\"(/>|>.*?</backend>)",
                         "<backend class=\"removedTileCache\"><host>cache-1</host><port>5701</port></backend>");
         Files.writeString(configFile.toPath(), xml);
 
         XMLConfiguration reloaded = reload();
-        UnresolvedTileCacheBackendInfo backend =
-                (UnresolvedTileCacheBackendInfo) reloaded.getTileCache().getBackend();
+        UnresolvedKeyValueStoreInfo backend =
+                (UnresolvedKeyValueStoreInfo) reloaded.getMemoryCache().getBackend();
         assertEquals("removedTileCache", backend.getAlias());
 
         // saved back as it was, so reinstalling the module restores it
-        reloaded.setTileCache(reloaded.getTileCache());
+        reloaded.setMemoryCache(reloaded.getMemoryCache());
         assertValidAgainstSchema();
         String saved = Files.readString(configFile.toPath());
         assertThat(saved, containsString("<backend class=\"removedTileCache\">"));

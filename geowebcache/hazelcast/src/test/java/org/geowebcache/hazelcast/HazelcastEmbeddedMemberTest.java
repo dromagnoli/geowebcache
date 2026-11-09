@@ -22,20 +22,24 @@ import static org.geowebcache.hazelcast.HazelcastTestMembers.xml;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import com.hazelcast.core.Hazelcast;
 import com.hazelcast.core.HazelcastInstance;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.util.Objects;
 import org.geowebcache.locks.LockProvider.Lock;
-import org.geowebcache.storage.tilecache.AbstractKeyValueStoreTest;
-import org.geowebcache.storage.tilecache.KeyValueStore;
+import org.geowebcache.storage.memorycache.AbstractKeyValueStoreTest;
+import org.geowebcache.storage.memorycache.KeyValueStore;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
 /** Runs the store on a member embedded in the test JVM, configured as an admin would in {@code hazelcast.xml}. */
-public class HazelcastEmbeddedTileCacheBackendTest extends AbstractKeyValueStoreTest {
+public class HazelcastEmbeddedMemberTest extends AbstractKeyValueStoreTest {
 
     private static final String MEMBER_XML =
             """
@@ -63,11 +67,11 @@ public class HazelcastEmbeddedTileCacheBackendTest extends AbstractKeyValueStore
 
     private static final byte[] TILE = {1};
 
-    private static HazelcastEmbeddedTileCacheBackend backend;
+    private static HazelcastEmbeddedMember backend;
 
     @BeforeClass
     public static void createBackend() {
-        backend = new HazelcastEmbeddedTileCacheBackend(xml(MEMBER_XML.formatted(CLUSTER, freePort())));
+        backend = new HazelcastEmbeddedMember(xml(MEMBER_XML.formatted(CLUSTER, freePort())));
     }
 
     @AfterClass
@@ -77,7 +81,7 @@ public class HazelcastEmbeddedTileCacheBackendTest extends AbstractKeyValueStore
 
     @Override
     protected KeyValueStore createStore() {
-        KeyValueStore created = backend.createStore(new HazelcastEmbeddedTileCacheBackendInfo());
+        KeyValueStore created = backend.createStore(new HazelcastEmbeddedKeyValueStoreInfo());
         // the member joins in the background, calls fail until then
         await().atMost(30, SECONDS).ignoreExceptions().untilAsserted(created::clear);
         return created;
@@ -87,8 +91,8 @@ public class HazelcastEmbeddedTileCacheBackendTest extends AbstractKeyValueStore
     public void testStoppedMemberStartedAgain() {
         int port = freePort();
         String memberXml = MEMBER_XML.formatted(CLUSTER, port);
-        HazelcastEmbeddedTileCacheBackend own = new HazelcastEmbeddedTileCacheBackend(xml(memberXml));
-        try (KeyValueStore restarted = own.createStore(new HazelcastEmbeddedTileCacheBackendInfo())) {
+        HazelcastEmbeddedMember own = new HazelcastEmbeddedMember(xml(memberXml));
+        try (KeyValueStore restarted = own.createStore(new HazelcastEmbeddedKeyValueStoreInfo())) {
             await().atMost(30, SECONDS).ignoreExceptions().untilAsserted(() -> restarted.put("key", TILE, 300));
 
             // as an out of memory error or a cluster shutdown would
@@ -106,9 +110,35 @@ public class HazelcastEmbeddedTileCacheBackendTest extends AbstractKeyValueStore
     }
 
     @Test
+    public void testFailedMemberNotStartedAgainAtOnce() throws Exception {
+        // the member cannot bind its port, so every start fails at once
+        ServerSocket taken = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
+        HazelcastEmbeddedMember own =
+                new HazelcastEmbeddedMember(xml(MEMBER_XML.formatted(CLUSTER, taken.getLocalPort())));
+        try (taken;
+                KeyValueStore store = own.createStore(new HazelcastEmbeddedKeyValueStoreInfo())) {
+            // the first failure starts a new member right away
+            Throwable first = await().atMost(30, SECONDS).until(() -> failedStart(store), Objects::nonNull);
+            Throwable second = await().atMost(30, SECONDS)
+                    .until(() -> failedStart(store), cause -> cause != null && cause != first);
+
+            // within the interval the same failure is reported, as lock calls would otherwise start a member each
+            assertSame(second, failedStart(store));
+        } finally {
+            own.destroy();
+        }
+    }
+
+    /** The cause of the failed start {@code store} reports, null while the member is still joining. */
+    private static Throwable failedStart(KeyValueStore store) {
+        IllegalStateException e = assertThrows(IllegalStateException.class, () -> store.get("key"));
+        return e.getMessage().contains("failed to start") ? e.getCause() : null;
+    }
+
+    @Test
     public void testMissingFile() {
-        HazelcastEmbeddedTileCacheBackend missing = new HazelcastEmbeddedTileCacheBackend(NO_FILE);
-        HazelcastEmbeddedTileCacheBackendInfo settings = new HazelcastEmbeddedTileCacheBackendInfo();
+        HazelcastEmbeddedMember missing = new HazelcastEmbeddedMember(NO_FILE);
+        HazelcastEmbeddedKeyValueStoreInfo settings = new HazelcastEmbeddedKeyValueStoreInfo();
 
         IllegalStateException e = assertThrows(IllegalStateException.class, () -> missing.createStore(settings));
 
@@ -118,11 +148,10 @@ public class HazelcastEmbeddedTileCacheBackendTest extends AbstractKeyValueStore
     @Test
     public void testLockProviderLocksOnMember() throws Exception {
         int port = freePort();
-        HazelcastEmbeddedTileCacheBackend own =
-                new HazelcastEmbeddedTileCacheBackend(xml(MEMBER_XML.formatted(CLUSTER, port)));
+        HazelcastEmbeddedMember own = new HazelcastEmbeddedMember(xml(MEMBER_XML.formatted(CLUSTER, port)));
         HazelcastLockProvider locks = new HazelcastLockProvider();
         own.setLockProvider(locks);
-        try (KeyValueStore store = own.createStore(new HazelcastEmbeddedTileCacheBackendInfo())) {
+        try (KeyValueStore store = own.createStore(new HazelcastEmbeddedKeyValueStoreInfo())) {
             await().atMost(30, SECONDS).ignoreExceptions().untilAsserted(store::clear);
             HazelcastInstance member = Hazelcast.getAllHazelcastInstances().stream()
                     .filter(m -> m.getCluster().getLocalMember().getAddress().getPort() == port)
@@ -140,7 +169,7 @@ public class HazelcastEmbeddedTileCacheBackendTest extends AbstractKeyValueStore
 
     @Test
     public void testUndeclaredMap() {
-        HazelcastEmbeddedTileCacheBackendInfo settings = new HazelcastEmbeddedTileCacheBackendInfo();
+        HazelcastEmbeddedKeyValueStoreInfo settings = new HazelcastEmbeddedKeyValueStoreInfo();
         settings.setMapName("undeclared");
 
         IllegalStateException e = assertThrows(IllegalStateException.class, () -> backend.createStore(settings));

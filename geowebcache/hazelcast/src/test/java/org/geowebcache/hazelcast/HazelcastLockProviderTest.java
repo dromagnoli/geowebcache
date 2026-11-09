@@ -16,7 +16,7 @@ package org.geowebcache.hazelcast;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.awaitility.Awaitility.await;
-import static org.geowebcache.hazelcast.HazelcastClientTileCacheBackendInfo.DEFAULT_MAP_NAME;
+import static org.geowebcache.hazelcast.HazelcastClientKeyValueStoreInfo.DEFAULT_MAP_NAME;
 import static org.geowebcache.hazelcast.HazelcastTestMembers.NO_FILE;
 import static org.geowebcache.hazelcast.HazelcastTestMembers.clientSettings;
 import static org.geowebcache.hazelcast.HazelcastTestMembers.freePort;
@@ -35,7 +35,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import org.geowebcache.locks.LockProvider.Lock;
-import org.geowebcache.storage.tilecache.KeyValueStore;
+import org.geowebcache.storage.memorycache.KeyValueStore;
 import org.junit.After;
 import org.junit.Test;
 
@@ -44,27 +44,33 @@ public class HazelcastLockProviderTest {
 
     private static final String KEY = "gwc_metatile_test";
 
-    private final List<HazelcastClientTileCacheBackend> backends = new ArrayList<>();
+    private final List<HazelcastClientConnection> backends = new ArrayList<>();
 
     private final ExecutorService executor = Executors.newCachedThreadPool();
 
     @After
     public void shutdown() {
         executor.shutdownNow();
-        backends.forEach(HazelcastClientTileCacheBackend::destroy);
+        backends.forEach(HazelcastClientConnection::destroy);
         Hazelcast.shutdownAll();
     }
 
     /** A node with its own client, connected, waiting for and leasing locks {@code timeout} seconds. */
-    @SuppressWarnings("PMD.CloseResource") // closing the store stops the cluster locks, the backend goes after the test
     private HazelcastLockProvider node(int port, int timeout) {
         HazelcastLockProvider locks = new HazelcastLockProvider(timeout);
-        HazelcastClientTileCacheBackend backend = new HazelcastClientTileCacheBackend(NO_FILE);
+        connect(locks, port);
+        return locks;
+    }
+
+    /** The store of a new client locking through {@code locks}, once connected. */
+    @SuppressWarnings("PMD.CloseResource") // closing the store stops the cluster locks, the backend goes after the test
+    private KeyValueStore connect(HazelcastLockProvider locks, int port) {
+        HazelcastClientConnection backend = new HazelcastClientConnection(NO_FILE);
         backend.setLockProvider(locks);
         backends.add(backend);
         KeyValueStore store = backend.createStore(clientSettings(port));
         await().atMost(30, SECONDS).ignoreExceptions().until(() -> store.get("probe") == null);
-        return locks;
+        return store;
     }
 
     private static IMap<Object, Object> locks(HazelcastInstance member) {
@@ -152,7 +158,7 @@ public class HazelcastLockProviderTest {
         int port = freePort();
         HazelcastInstance member = start(port);
         HazelcastLockProvider locks = new HazelcastLockProvider(60);
-        HazelcastClientTileCacheBackend backend = new HazelcastClientTileCacheBackend(NO_FILE);
+        HazelcastClientConnection backend = new HazelcastClientConnection(NO_FILE);
         backend.setLockProvider(locks);
         backends.add(backend);
         KeyValueStore first = backend.createStore(clientSettings(port));
@@ -166,6 +172,20 @@ public class HazelcastLockProviderTest {
         // the cache switched to another backend
         second.close();
         assertFalse(lockedOnCluster(locks, member));
+    }
+
+    @Test
+    public void testUnreachableStoreLocksLocally() throws Exception {
+        int port = freePort();
+        HazelcastInstance member = start(port);
+        HazelcastLockProvider locks = new HazelcastLockProvider(60);
+        try (KeyValueStore store = connect(locks, port)) {
+            // the tile cache found the cluster down: locks skip it until the cache finds it back
+            store.reachable(false);
+            assertFalse(lockedOnCluster(locks, member));
+            store.reachable(true);
+            assertTrue(lockedOnCluster(locks, member));
+        }
     }
 
     private static boolean lockedOnCluster(HazelcastLockProvider locks, HazelcastInstance member) throws Exception {

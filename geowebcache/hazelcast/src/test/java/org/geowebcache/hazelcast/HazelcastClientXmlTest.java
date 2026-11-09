@@ -28,7 +28,7 @@ import com.hazelcast.client.HazelcastClientOfflineException;
 import com.hazelcast.client.config.ClientConfig;
 import com.hazelcast.client.config.ConnectionRetryConfig;
 import com.hazelcast.core.HazelcastInstance;
-import org.geowebcache.storage.tilecache.KeyValueStore;
+import org.geowebcache.storage.memorycache.KeyValueStore;
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
@@ -76,9 +76,9 @@ public class HazelcastClientXmlTest {
     private static int port;
 
     /** Default settings point to localhost:5701 in cluster "gwc", reaching the member only through the file. */
-    private final HazelcastClientTileCacheBackendInfo settings = new HazelcastClientTileCacheBackendInfo();
+    private final HazelcastClientKeyValueStoreInfo settings = new HazelcastClientKeyValueStoreInfo();
 
-    private HazelcastClientTileCacheBackend backend;
+    private HazelcastClientConnection backend;
 
     @BeforeClass
     public static void startMember() {
@@ -98,7 +98,7 @@ public class HazelcastClientXmlTest {
 
     @Test
     public void testFileReplacesSettings() {
-        backend = new HazelcastClientTileCacheBackend(xml(CLIENT_XML.formatted(CLUSTER, port)));
+        backend = new HazelcastClientConnection(xml(CLIENT_XML.formatted(CLUSTER, port)));
 
         try (KeyValueStore store = backend.createStore(settings)) {
             await().atMost(30, SECONDS).ignoreExceptions().until(() -> store.get("probe") == null);
@@ -110,14 +110,14 @@ public class HazelcastClientXmlTest {
 
     @Test
     public void testDefaultsUnlessFileSetsThem() {
-        backend = new HazelcastClientTileCacheBackend(xml(CLIENT_XML.formatted(CLUSTER, port)));
+        backend = new HazelcastClientConnection(xml(CLIENT_XML.formatted(CLUSTER, port)));
         ClientConfig config = backend.clientConfig(settings);
         assertEquals("5", config.getProperty(INVOCATION_TIMEOUT_SECONDS.getName()));
         ConnectionRetryConfig retry = config.getConnectionStrategyConfig().getConnectionRetryConfig();
         assertEquals(2, retry.getMultiplier(), 0);
         assertEquals(0.2, retry.getJitter(), 0);
 
-        config = new HazelcastClientTileCacheBackend(xml(TUNED_XML)).clientConfig(settings);
+        config = new HazelcastClientConnection(xml(TUNED_XML)).clientConfig(settings);
         assertEquals("20", config.getProperty(INVOCATION_TIMEOUT_SECONDS.getName()));
         retry = config.getConnectionStrategyConfig().getConnectionRetryConfig();
         assertEquals(1.5, retry.getMultiplier(), 0);
@@ -126,7 +126,7 @@ public class HazelcastClientXmlTest {
 
     @Test
     public void testRecoveryEnforced() {
-        backend = new HazelcastClientTileCacheBackend(xml(CLIENT_XML.formatted(CLUSTER, 1)));
+        backend = new HazelcastClientConnection(xml(CLIENT_XML.formatted(CLUSTER, 1)));
 
         // async start enforced: with the file's blocking start this would wait, then fail
         try (KeyValueStore store = backend.createStore(settings)) {

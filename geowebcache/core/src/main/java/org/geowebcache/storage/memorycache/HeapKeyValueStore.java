@@ -11,7 +11,7 @@
  *
  * <p>Copyright 2026
  */
-package org.geowebcache.storage.tilecache;
+package org.geowebcache.storage.memorycache;
 
 import static java.util.concurrent.TimeUnit.SECONDS;
 
@@ -50,8 +50,7 @@ public class HeapKeyValueStore implements KeyValueStore {
     public byte[] get(String key) {
         Entry entry = cache.getIfPresent(key);
         if (entry == null) return null;
-        // nanoTime-style values can overflow, compare the difference
-        if (ticker.read() - entry.expiresAtNanos >= 0) {
+        if (expired(entry)) {
             cache.asMap().remove(key, entry);
             return null;
         }
@@ -61,6 +60,19 @@ public class HeapKeyValueStore implements KeyValueStore {
     @Override
     public void put(String key, byte[] value, long ttlSeconds) {
         cache.put(key, new Entry(value, ticker.read() + SECONDS.toNanos(ttlSeconds)));
+    }
+
+    @Override
+    public void putIfAbsent(String key, byte[] value, long ttlSeconds) {
+        Entry entry = new Entry(value, ticker.read() + SECONDS.toNanos(ttlSeconds));
+        Entry current = cache.asMap().putIfAbsent(key, entry);
+        // an expired entry counts as absent, as get reports it so
+        if (current != null && expired(current)) cache.asMap().replace(key, current, entry);
+    }
+
+    private boolean expired(Entry entry) {
+        // nanoTime-style values can overflow, compare the difference
+        return ticker.read() - entry.expiresAtNanos >= 0;
     }
 
     @Override

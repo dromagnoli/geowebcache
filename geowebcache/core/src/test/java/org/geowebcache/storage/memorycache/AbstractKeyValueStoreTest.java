@@ -11,7 +11,7 @@
  *
  * <p>Copyright 2026
  */
-package org.geowebcache.storage.tilecache;
+package org.geowebcache.storage.memorycache;
 
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -116,6 +116,16 @@ public abstract class AbstractKeyValueStoreTest {
         store.clear();
 
         assertThat(presentKeys(), empty());
+    }
+
+    @Test
+    public void testPutIfAbsentKeepsPresentValue() {
+        store.put("key", new byte[] {1}, 300);
+        store.putIfAbsent("key", new byte[] {2}, 300);
+        store.putIfAbsent("other", new byte[] {3}, 300);
+
+        assertArrayEquals(new byte[] {1}, store.get("key"));
+        assertArrayEquals(new byte[] {3}, store.get("other"));
     }
 
     @Test

@@ -27,14 +27,21 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 
 import com.hazelcast.client.HazelcastClientOfflineException;
+import com.hazelcast.core.HazelcastException;
 import com.hazelcast.core.HazelcastInstance;
 import com.hazelcast.core.OperationTimeoutException;
 import com.hazelcast.map.IMap;
 import com.hazelcast.map.MapInterceptor;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.util.Arrays;
+import java.util.concurrent.CountDownLatch;
+import java.util.function.UnaryOperator;
 import java.util.stream.IntStream;
-import org.geowebcache.storage.tilecache.AbstractKeyValueStoreTest;
-import org.geowebcache.storage.tilecache.KeyValueStore;
+import org.geowebcache.storage.memorycache.AbstractKeyValueStoreTest;
+import org.geowebcache.storage.memorycache.KeyValueStore;
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
@@ -46,11 +53,11 @@ public class HazelcastKeyValueStoreTest extends AbstractKeyValueStoreTest {
 
     private static HazelcastInstance member;
 
-    private static HazelcastClientTileCacheBackendInfo settings;
+    private static HazelcastClientKeyValueStoreInfo settings;
 
-    private final HazelcastClientTileCacheBackend backend = new HazelcastClientTileCacheBackend(NO_FILE);
+    private final HazelcastClientConnection backend = new HazelcastClientConnection(NO_FILE);
 
-    private final HazelcastClientTileCacheBackend otherBackend = new HazelcastClientTileCacheBackend(NO_FILE);
+    private final HazelcastClientConnection otherBackend = new HazelcastClientConnection(NO_FILE);
 
     @BeforeClass
     public static void startMember() {
@@ -78,7 +85,7 @@ public class HazelcastKeyValueStoreTest extends AbstractKeyValueStoreTest {
     }
 
     /** The client starts in the background, calls fail until it connects. */
-    private static KeyValueStore connectedStore(HazelcastClientTileCacheBackend backend) {
+    private static KeyValueStore connectedStore(HazelcastClientConnection backend) {
         KeyValueStore created = backend.createStore(settings);
         await().atMost(30, SECONDS).ignoreExceptions().until(() -> created.get("probe") == null);
         return created;
@@ -105,7 +112,7 @@ public class HazelcastKeyValueStoreTest extends AbstractKeyValueStoreTest {
 
     @Test
     public void testUnreachableClusterFailsFast() {
-        HazelcastClientTileCacheBackendInfo unreachable = new HazelcastClientTileCacheBackendInfo();
+        HazelcastClientKeyValueStoreInfo unreachable = new HazelcastClientKeyValueStoreInfo();
         unreachable.setClusterName(CLUSTER);
         unreachable.setMembers("127.0.0.1:1");
 
@@ -139,7 +146,12 @@ public class HazelcastKeyValueStoreTest extends AbstractKeyValueStoreTest {
     @Test
     public void testRemoveMatchingWidenedPastLimit() {
         try (KeyValueStore limited = new HazelcastKeyValueStore(
-                () -> member, settings.getMapName(), 3, HazelcastKeyValueStore.CALL_TIMEOUT, () -> {})) {
+                () -> member,
+                settings.getMapName(),
+                3,
+                HazelcastKeyValueStore.CALL_TIMEOUT,
+                HazelcastKeyValueStore.BULK_TIMEOUT,
+                null)) {
             IntStream.range(0, 3).forEach(i -> store.put("layer/1/" + i, new byte[] {1}, 300));
             store.put("layer/2/0", new byte[] {1}, 300);
 
@@ -164,11 +176,74 @@ public class HazelcastKeyValueStoreTest extends AbstractKeyValueStoreTest {
         map.set("tile", Stall.VALUE);
         String interceptor = map.addInterceptor(new Stall());
         try (KeyValueStore stalled = new HazelcastKeyValueStore(
-                () -> member, "stalled-tiles", HazelcastKeyValueStore.MATCHING_LIMIT, 200, () -> {})) {
+                () -> member, "stalled-tiles", HazelcastKeyValueStore.MATCHING_LIMIT, 200, 200, null)) {
             assertFailsFast(() -> stalled.get("tile"));
             assertFailsFast(() -> stalled.put("other", Stall.VALUE, 300));
+            assertFailsFast(() -> stalled.remove("tile"));
         } finally {
             map.removeInterceptor(interceptor);
+        }
+    }
+
+    @Test
+    public void testRefusedIndexKeepsTruncating() {
+        HazelcastInstance refusing = wrapMaps(map -> proxy(IMap.class, (s, m, a) -> refuseIndex(m, map, a)));
+        try (KeyValueStore unindexed = new HazelcastKeyValueStore(
+                () -> refusing, "unindexed-tiles", HazelcastKeyValueStore.MATCHING_LIMIT, 2000, 2000, null)) {
+            unindexed.put("layer/a/1", new byte[] {1}, 300);
+            unindexed.put("other/a/1", new byte[] {1}, 300);
+
+            unindexed.removeByPrefix("layer/");
+            unindexed.removeMatching("other/", key -> key.endsWith("/1"));
+
+            assertNull(unindexed.get("layer/a/1"));
+            assertNull(unindexed.get("other/a/1"));
+        }
+    }
+
+    @Test
+    public void testStalledBulkCallFailsWithinBulkTimeout() {
+        CountDownLatch release = new CountDownLatch(1);
+        HazelcastInstance stalling = wrapMaps(map -> proxy(IMap.class, (s, m, a) -> holdRemoval(m, map, a, release)));
+        try (KeyValueStore stalled = new HazelcastKeyValueStore(
+                () -> stalling, "bulk-tiles", HazelcastKeyValueStore.MATCHING_LIMIT, 200, 200, null)) {
+            assertFailsFast(() -> stalled.removeByPrefix("layer/"));
+        } finally {
+            release.countDown();
+        }
+    }
+
+    /** Calls {@code method} on {@code map}, a bulk removal waiting for {@code release} as on a stalled member. */
+    private static Object holdRemoval(Method method, IMap<?, ?> map, Object[] args, CountDownLatch release)
+            throws Throwable {
+        if (method.getName().equals("removeAll")) release.await();
+        return call(method, map, args);
+    }
+
+    /** The test member, with each of its maps seen through {@code wrap}. */
+    private static HazelcastInstance wrapMaps(UnaryOperator<IMap<?, ?>> wrap) {
+        return proxy(HazelcastInstance.class, (self, method, args) -> {
+            Object result = call(method, member, args);
+            return result instanceof IMap<?, ?> map ? wrap.apply(map) : result;
+        });
+    }
+
+    /** Calls {@code method} on {@code map}, refusing to add an index, as a cluster denying it would. */
+    private static Object refuseIndex(Method method, IMap<?, ?> map, Object[] args) throws Throwable {
+        if (method.getName().equals("addIndex")) throw new HazelcastException("Index refused");
+        return call(method, map, args);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> T proxy(Class<T> type, InvocationHandler handler) {
+        return (T) Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[] {type}, handler);
+    }
+
+    private static Object call(Method method, Object target, Object[] args) throws Throwable {
+        try {
+            return method.invoke(target, args);
+        } catch (InvocationTargetException e) {
+            throw e.getCause();
         }
     }
 

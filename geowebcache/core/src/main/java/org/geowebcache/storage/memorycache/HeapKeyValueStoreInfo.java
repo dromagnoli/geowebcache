@@ -11,12 +11,14 @@
  *
  * <p>Copyright 2026
  */
-package org.geowebcache.storage.tilecache;
+package org.geowebcache.storage.memorycache;
 
 import java.io.Serial;
 
-/** Settings of the {@link HeapTileCacheBackend}; an absent element reads as its default. */
-public class HeapTileCacheBackendInfo implements TileCacheBackendInfo {
+/**
+ * Settings of the {@link HeapKeyValueStore}, tiles in the heap of each node; an absent element reads as its default.
+ */
+public class HeapKeyValueStoreInfo implements KeyValueStoreInfo {
 
     @Serial
     private static final long serialVersionUID = 1L;
@@ -35,10 +37,15 @@ public class HeapTileCacheBackendInfo implements TileCacheBackendInfo {
         this.maxSizeMB = maxSizeMB;
     }
 
+    @Override
+    public KeyValueStore createStore() {
+        return new HeapKeyValueStore(getMaxSizeMB() * 1024L * 1024L);
+    }
+
     /** Equal when the effective settings are, an absent value matching its default. */
     @Override
     public boolean equals(Object o) {
-        return o instanceof HeapTileCacheBackendInfo other && getMaxSizeMB() == other.getMaxSizeMB();
+        return o instanceof HeapKeyValueStoreInfo other && getMaxSizeMB() == other.getMaxSizeMB();
     }
 
     @Override

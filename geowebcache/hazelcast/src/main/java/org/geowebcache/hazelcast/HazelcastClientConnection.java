@@ -28,18 +28,17 @@ import java.util.List;
 import java.util.logging.Logger;
 import org.geotools.util.logging.Logging;
 import org.geowebcache.config.ConfigurationResourceProvider;
-import org.geowebcache.storage.tilecache.KeyValueStore;
-import org.geowebcache.storage.tilecache.TileCacheBackend;
-import org.geowebcache.storage.tilecache.TileCacheBackendInfo;
+import org.geowebcache.hazelcast.HazelcastLockProvider.Target;
+import org.geowebcache.storage.memorycache.KeyValueStore;
 import org.springframework.beans.factory.DisposableBean;
 
 /**
- * {@link TileCacheBackend} storing tiles in a Hazelcast cluster reached as a client. The client is shared by every
- * store and shut down with the application context, so connection settings apply on restart, the map name on save.
+ * Hazelcast client shared by the stores of {@link HazelcastClientKeyValueStoreInfo} and shut down with the application
+ * context, so connection settings apply on restart, the map name on save.
  */
-public class HazelcastClientTileCacheBackend implements TileCacheBackend, DisposableBean {
+public class HazelcastClientConnection implements DisposableBean {
 
-    private static final Logger LOGGER = Logging.getLogger(HazelcastClientTileCacheBackend.class.getName());
+    private static final Logger LOGGER = Logging.getLogger(HazelcastClientConnection.class.getName());
 
     /** Shortest wait between two client rebuilds, as lock calls reach {@link #running} without the cache backoff. */
     private static final long REBUILD_INTERVAL_MILLIS = 30_000;
@@ -59,38 +58,26 @@ public class HazelcastClientTileCacheBackend implements TileCacheBackend, Dispos
 
     /**
      * Connects as {@code clientXml} says when it exists, replacing every connection setting of
-     * {@link HazelcastClientTileCacheBackendInfo}; async start, async reconnect and unlimited connection retry are
-     * always enforced.
+     * {@link HazelcastClientKeyValueStoreInfo}; async start, async reconnect and unlimited connection retry are always
+     * enforced.
      */
-    public HazelcastClientTileCacheBackend(ConfigurationResourceProvider clientXml) {
+    public HazelcastClientConnection(ConfigurationResourceProvider clientXml) {
         this.clientXml = clientXml;
-    }
-
-    @Override
-    public String getId() {
-        return "hazelcast-client";
-    }
-
-    @Override
-    public Class<HazelcastClientTileCacheBackendInfo> getSettingsClass() {
-        return HazelcastClientTileCacheBackendInfo.class;
     }
 
     /**
      * Returns a store on the shared client, connecting first if needed. A client that shut down, for example when the
      * cluster rejected it, is replaced on a later call.
      */
-    @Override
-    public synchronized KeyValueStore createStore(TileCacheBackendInfo info) {
-        HazelcastClientTileCacheBackendInfo settings = (HazelcastClientTileCacheBackendInfo) info;
+    synchronized KeyValueStore createStore(HazelcastClientKeyValueStoreInfo settings) {
         if (client == null) {
             config = clientConfig(settings);
             client = HazelcastClient.newHazelcastClient(config);
         }
         String mapName = settings.getMapName();
         // closed when the cache settings change, so a switch to another backend stops the cluster locks
-        Runnable stopLocking = lockProvider == null ? () -> {} : lockProvider.lockOn(this::running, mapName);
-        return new HazelcastKeyValueStore(this::running, mapName, stopLocking);
+        Target locks = lockProvider == null ? null : lockProvider.lockOn(this::running, mapName);
+        return new HazelcastKeyValueStore(this::running, mapName, locks);
     }
 
     /** The running client; lock free on this path, as every cache call goes through it. */
@@ -118,7 +105,7 @@ public class HazelcastClientTileCacheBackend implements TileCacheBackend, Dispos
     }
 
     /** The client configuration, with the tile cache defaults filled in where the file leaves Hazelcast's own. */
-    ClientConfig clientConfig(HazelcastClientTileCacheBackendInfo settings) {
+    ClientConfig clientConfig(HazelcastClientKeyValueStoreInfo settings) {
         ClientConfig config = clientXml.hasInput() ? readClientXml() : fromSettings(settings);
 
         // cache calls run under the blob store lock, give up in seconds instead of the default 120
@@ -156,7 +143,7 @@ public class HazelcastClientTileCacheBackend implements TileCacheBackend, Dispos
         }
     }
 
-    private static ClientConfig fromSettings(HazelcastClientTileCacheBackendInfo settings) {
+    private static ClientConfig fromSettings(HazelcastClientKeyValueStoreInfo settings) {
         ClientConfig config = new ClientConfig();
         config.setClusterName(settings.getClusterName());
         config.getNetworkConfig().setAddresses(List.of(settings.getMembers().split("\\s*,\\s*")));

@@ -11,11 +11,11 @@
  *
  * <p>Copyright 2026
  */
-package org.geowebcache.storage.tilecache;
+package org.geowebcache.storage.memorycache;
 
 import static java.util.concurrent.TimeUnit.SECONDS;
-import static org.geowebcache.storage.tilecache.TileCacheStats.Result.HIT;
-import static org.geowebcache.storage.tilecache.TileCacheStats.Result.MISS;
+import static org.geowebcache.storage.memorycache.MemoryCacheStats.Result.HIT;
+import static org.geowebcache.storage.memorycache.MemoryCacheStats.Result.MISS;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.empty;
@@ -25,18 +25,18 @@ import static org.junit.Assert.assertSame;
 import com.google.common.base.Ticker;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
-import org.geowebcache.storage.tilecache.TileCacheStats.LayerStats;
+import org.geowebcache.storage.memorycache.MemoryCacheStats.LayerStats;
 import org.junit.Rule;
 import org.junit.Test;
 
-public class TileCacheStatsTest {
+public class MemoryCacheStatsTest {
 
     @Rule
-    public LogLines log = new LogLines(TileCacheStats.class, Level.INFO);
+    public LogLines log = new LogLines(MemoryCacheStats.class, Level.INFO);
 
     private final AtomicLong now = new AtomicLong();
 
-    private final TileCacheStats stats = new TileCacheStats(300, new Ticker() {
+    private final MemoryCacheStats stats = new MemoryCacheStats(300, new Ticker() {
         @Override
         public long read() {
             return now.get();
@@ -99,7 +99,7 @@ public class TileCacheStatsTest {
 
     @Test
     public void testZeroIntervalNeverReports() {
-        TileCacheStats off = new TileCacheStats(0, Ticker.systemTicker());
+        MemoryCacheStats off = new MemoryCacheStats(0, Ticker.systemTicker());
         off.forLayer("roads").read(HIT);
 
         off.report();

@@ -11,7 +11,7 @@
  *
  * <p>Copyright 2026
  */
-package org.geowebcache.storage.tilecache;
+package org.geowebcache.storage.memorycache;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.lessThanOrEqualTo;
@@ -49,6 +49,16 @@ public class HeapKeyValueStoreTest extends AbstractKeyValueStoreTest {
 
         assertNull(store.get("short"));
         assertArrayEquals(new byte[] {2}, store.get("long"));
+    }
+
+    @Test
+    public void testPutIfAbsentReplacesExpiredValue() {
+        store.put("key", new byte[] {1}, 10);
+        now.addAndGet(TimeUnit.SECONDS.toNanos(10));
+
+        store.putIfAbsent("key", new byte[] {2}, 10);
+
+        assertArrayEquals(new byte[] {2}, store.get("key"));
     }
 
     @Test

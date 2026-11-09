@@ -31,7 +31,7 @@ import com.hazelcast.client.HazelcastClientOfflineException;
 import com.hazelcast.core.Hazelcast;
 import com.hazelcast.core.HazelcastInstance;
 import java.util.stream.IntStream;
-import org.geowebcache.storage.tilecache.KeyValueStore;
+import org.geowebcache.storage.memorycache.KeyValueStore;
 import org.junit.After;
 import org.junit.Test;
 
@@ -40,7 +40,7 @@ public class HazelcastRecoveryTest {
 
     private static final byte[] TILE = {1};
 
-    private final HazelcastClientTileCacheBackend backend = new HazelcastClientTileCacheBackend(NO_FILE);
+    private final HazelcastClientConnection backend = new HazelcastClientConnection(NO_FILE);
 
     @After
     public void shutdown() {
@@ -52,7 +52,7 @@ public class HazelcastRecoveryTest {
     public void testMemberRestart() {
         int port = freePort();
         HazelcastInstance member = start(port);
-        HazelcastClientTileCacheBackendInfo settings = clientSettings(port);
+        HazelcastClientKeyValueStoreInfo settings = clientSettings(port);
         try (KeyValueStore store = backend.createStore(settings)) {
             await().atMost(30, SECONDS).ignoreExceptions().until(() -> store.get("probe") == null);
 

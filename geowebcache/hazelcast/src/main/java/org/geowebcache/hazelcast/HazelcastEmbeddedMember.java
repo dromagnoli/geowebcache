@@ -23,19 +23,26 @@ import java.io.UncheckedIOException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
+import java.util.logging.Logger;
+import org.geotools.util.logging.Logging;
 import org.geowebcache.config.ConfigurationResourceProvider;
-import org.geowebcache.storage.tilecache.KeyValueStore;
-import org.geowebcache.storage.tilecache.TileCacheBackend;
-import org.geowebcache.storage.tilecache.TileCacheBackendInfo;
+import org.geowebcache.hazelcast.HazelcastLockProvider.Target;
+import org.geowebcache.storage.memorycache.KeyValueStore;
 import org.springframework.beans.factory.DisposableBean;
 
 /**
- * {@link TileCacheBackend} making each node a member of a Hazelcast cluster configured by {@code hazelcast.xml}. The
- * member is shared by every store and shut down with the application context, so the file applies on restart.
+ * Hazelcast member making this node part of the cluster configured by {@code hazelcast.xml}, shared by the stores of
+ * {@link HazelcastEmbeddedKeyValueStoreInfo} and shut down with the application context, so the file applies on
+ * restart.
  */
-public class HazelcastEmbeddedTileCacheBackend implements TileCacheBackend, DisposableBean {
+public class HazelcastEmbeddedMember implements DisposableBean {
 
-    /** One short-lived daemon thread per member start, which happens once per application context. */
+    private static final Logger LOGGER = Logging.getLogger(HazelcastEmbeddedMember.class.getName());
+
+    /** Shortest wait between two member starts, as lock calls reach {@link #running} without the cache backoff. */
+    private static final long RESTART_INTERVAL_MILLIS = 30_000;
+
+    /** One short-lived daemon thread per member start, at most one every {@link #RESTART_INTERVAL_MILLIS}. */
     private static final Executor START = task -> {
         Thread thread = new Thread(task, "gwc-hazelcast-member-start");
         thread.setDaemon(true);
@@ -50,21 +57,14 @@ public class HazelcastEmbeddedTileCacheBackend implements TileCacheBackend, Disp
     /** The member, joining its cluster in the background; null once destroyed. Written under the lock only. */
     private volatile CompletableFuture<HazelcastInstance> member;
 
+    /** Epoch millis before which a failed or stopped member is not started again. */
+    private long restartAfter;
+
     private HazelcastLockProvider lockProvider;
 
     /** Starts the member from {@code memberXml}, which must exist and declare the tile map. */
-    public HazelcastEmbeddedTileCacheBackend(ConfigurationResourceProvider memberXml) {
+    public HazelcastEmbeddedMember(ConfigurationResourceProvider memberXml) {
         this.memberXml = memberXml;
-    }
-
-    @Override
-    public String getId() {
-        return "hazelcast-embedded";
-    }
-
-    @Override
-    public Class<HazelcastEmbeddedTileCacheBackendInfo> getSettingsClass() {
-        return HazelcastEmbeddedTileCacheBackendInfo.class;
     }
 
     /**
@@ -73,9 +73,8 @@ public class HazelcastEmbeddedTileCacheBackend implements TileCacheBackend, Disp
      *
      * @throws IllegalStateException when the file is missing or does not declare the map
      */
-    @Override
-    public synchronized KeyValueStore createStore(TileCacheBackendInfo info) {
-        String mapName = ((HazelcastEmbeddedTileCacheBackendInfo) info).getMapName();
+    synchronized KeyValueStore createStore(HazelcastEmbeddedKeyValueStoreInfo settings) {
+        String mapName = settings.getMapName();
         if (config == null) config = memberConfig();
         // an undeclared map would get the defaults: no eviction, no size bound, tiles filling the heap of every node
         if (config.getMapConfigOrNull(mapName) == null) {
@@ -84,8 +83,8 @@ public class HazelcastEmbeddedTileCacheBackend implements TileCacheBackend, Disp
         }
         if (member == null) start();
         // closed when the cache settings change, so a switch to another backend stops the cluster locks
-        Runnable stopLocking = lockProvider == null ? () -> {} : lockProvider.lockOn(this::running, mapName);
-        return new HazelcastKeyValueStore(this::running, mapName, stopLocking);
+        Target locks = lockProvider == null ? null : lockProvider.lockOn(this::running, mapName);
+        return new HazelcastKeyValueStore(this::running, mapName, locks);
     }
 
     /** Makes {@code lockProvider} lock on the member of the stores created from now on. */
@@ -116,12 +115,13 @@ public class HazelcastEmbeddedTileCacheBackend implements TileCacheBackend, Disp
         throw new IllegalStateException("Embedded Hazelcast member stopped, starting again");
     }
 
-    /**
-     * Starts a new member unless another call already did, or the backend was destroyed. Calls reach it at most once
-     * per retry interval of the cache, so restarts need no backoff of their own.
-     */
+    /** Starts a new member unless another call already did, the member was destroyed, or it is too soon. */
     private synchronized void restart(CompletableFuture<HazelcastInstance> failed) {
-        if (member == failed) start();
+        long now = System.currentTimeMillis();
+        if (member != failed || now < restartAfter) return;
+        restartAfter = now + RESTART_INTERVAL_MILLIS;
+        LOGGER.warning("Embedded Hazelcast member failed to start or stopped, starting a new one");
+        start();
     }
 
     private Config memberConfig() {

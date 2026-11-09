@@ -11,14 +11,14 @@
  *
  * <p>Copyright 2026
  */
-package org.geowebcache.storage.tilecache;
+package org.geowebcache.storage.memorycache;
 
 import java.io.Serial;
 import java.io.Serializable;
 import java.util.Objects;
 
-/** The {@code <tileCache>} settings of {@code geowebcache.xml}; an absent element reads as its default. */
-public class TileCacheInfo implements Serializable {
+/** The {@code <memoryCache>} settings of {@code geowebcache.xml}; an absent element reads as its default. */
+public class MemoryCacheInfo implements Serializable {
 
     @Serial
     private static final long serialVersionUID = 1L;
@@ -35,7 +35,7 @@ public class TileCacheInfo implements Serializable {
 
     private Long statsInterval;
 
-    private TileCacheBackendInfo backend;
+    private KeyValueStoreInfo backend;
 
     /** Whether cached layers go through the cache, false by default. */
     public boolean isEnabled() {
@@ -78,19 +78,19 @@ public class TileCacheInfo implements Serializable {
     }
 
     /** The backend settings, the heap backend with its defaults when absent. */
-    public TileCacheBackendInfo getBackend() {
-        return backend == null ? new HeapTileCacheBackendInfo() : backend;
+    public KeyValueStoreInfo getBackend() {
+        return backend == null ? new HeapKeyValueStoreInfo() : backend;
     }
 
-    /** Sets the backend settings, whose class picks the {@link TileCacheBackend}. */
-    public void setBackend(TileCacheBackendInfo backend) {
+    /** Sets the backend settings, which create the store of the cache. */
+    public void setBackend(KeyValueStoreInfo backend) {
         this.backend = backend;
     }
 
     /** Equal when the effective settings are, an absent value matching its default. */
     @Override
     public boolean equals(Object o) {
-        return o instanceof TileCacheInfo other
+        return o instanceof MemoryCacheInfo other
                 && isEnabled() == other.isEnabled()
                 && getTimeToLive() == other.getTimeToLive()
                 && isPassthrough() == other.isPassthrough()

@@ -91,9 +91,9 @@ import org.geowebcache.seed.TruncateAllRequest;
 import org.geowebcache.seed.TruncateLayerRequest;
 import org.geowebcache.storage.DefaultStorageFinder;
 import org.geowebcache.storage.UnsuitableStorageException;
-import org.geowebcache.storage.tilecache.HeapTileCacheBackendInfo;
-import org.geowebcache.storage.tilecache.TileCacheInfo;
-import org.geowebcache.storage.tilecache.UnresolvedTileCacheBackendInfo;
+import org.geowebcache.storage.memorycache.HeapKeyValueStoreInfo;
+import org.geowebcache.storage.memorycache.MemoryCacheInfo;
+import org.geowebcache.storage.memorycache.UnresolvedKeyValueStoreInfo;
 import org.geowebcache.util.ApplicationContextProvider;
 import org.geowebcache.util.ExceptionUtils;
 import org.geowebcache.util.URLs;
@@ -385,9 +385,9 @@ public class XMLConfiguration
 
         xs.alias("blobStores", new ArrayList<BlobStoreInfo>().getClass());
         xs.alias("FileBlobStore", FileBlobStoreInfo.class);
-        xs.alias("heapTileCache", HeapTileCacheBackendInfo.class);
+        xs.alias("heapKeyValueStore", HeapKeyValueStoreInfo.class);
         // a removed backend module must not fail the whole configuration
-        UnresolvedTileCacheBackendInfo.register(xs);
+        UnresolvedKeyValueStoreInfo.register(xs);
         xs.aliasAttribute(BlobStoreInfo.class, "_default", "default");
         // Alias added to retain XML backwards-compatibility.
         // TODO: Would be nice to be able to use name for consistency
@@ -1267,13 +1267,13 @@ public class XMLConfiguration
     }
 
     @Override
-    public TileCacheInfo getTileCache() {
-        return getGwcConfig().getTileCache();
+    public MemoryCacheInfo getMemoryCache() {
+        return getGwcConfig().getMemoryCache();
     }
 
     /** Saves the tile cache settings; pass a new instance, the cache is rebuilt only when the instance changes. */
-    public void setTileCache(TileCacheInfo tileCache) throws IOException {
-        getGwcConfig().setTileCache(tileCache);
+    public void setMemoryCache(MemoryCacheInfo memoryCache) throws IOException {
+        getGwcConfig().setMemoryCache(memoryCache);
         save();
     }
 

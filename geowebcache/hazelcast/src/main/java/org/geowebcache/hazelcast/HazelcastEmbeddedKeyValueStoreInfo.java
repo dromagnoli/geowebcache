@@ -14,10 +14,12 @@
 package org.geowebcache.hazelcast;
 
 import java.io.Serial;
-import org.geowebcache.storage.tilecache.TileCacheBackendInfo;
+import org.geowebcache.GeoWebCacheExtensions;
+import org.geowebcache.storage.memorycache.KeyValueStore;
+import org.geowebcache.storage.memorycache.KeyValueStoreInfo;
 
-/** Settings of the {@link HazelcastEmbeddedTileCacheBackend}; an absent element reads as its default. */
-public class HazelcastEmbeddedTileCacheBackendInfo implements TileCacheBackendInfo {
+/** Settings of a store in a Hazelcast cluster this node is a member of; an absent element reads as its default. */
+public class HazelcastEmbeddedKeyValueStoreInfo implements KeyValueStoreInfo {
 
     @Serial
     private static final long serialVersionUID = 1L;
@@ -26,7 +28,7 @@ public class HazelcastEmbeddedTileCacheBackendInfo implements TileCacheBackendIn
 
     /** Name of the map holding the tiles, declared in {@code hazelcast.xml}; "gwc-tiles" by default. */
     public String getMapName() {
-        return mapName == null ? HazelcastClientTileCacheBackendInfo.DEFAULT_MAP_NAME : mapName;
+        return mapName == null ? HazelcastClientKeyValueStoreInfo.DEFAULT_MAP_NAME : mapName;
     }
 
     /** Sets the name of the map holding the tiles. */
@@ -34,10 +36,23 @@ public class HazelcastEmbeddedTileCacheBackendInfo implements TileCacheBackendIn
         this.mapName = mapName;
     }
 
+    /**
+     * Returns a store on the member shared by the application context, starting it first if needed.
+     *
+     * @throws IllegalStateException when the context has no {@link HazelcastEmbeddedMember}, or when
+     *     {@code hazelcast.xml} is missing or does not declare the map
+     */
+    @Override
+    public KeyValueStore createStore() {
+        HazelcastEmbeddedMember member = GeoWebCacheExtensions.bean(HazelcastEmbeddedMember.class);
+        if (member == null) throw new IllegalStateException("No embedded Hazelcast member in the application context");
+        return member.createStore(this);
+    }
+
     /** Equal when the effective settings are, an absent value matching its default. */
     @Override
     public boolean equals(Object o) {
-        return o instanceof HazelcastEmbeddedTileCacheBackendInfo other
+        return o instanceof HazelcastEmbeddedKeyValueStoreInfo other
                 && getMapName().equals(other.getMapName());
     }
 

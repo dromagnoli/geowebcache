@@ -11,7 +11,7 @@
  *
  * <p>Copyright 2026
  */
-package org.geowebcache.storage.tilecache;
+package org.geowebcache.storage.memorycache;
 
 import java.util.function.Predicate;
 
@@ -30,6 +30,9 @@ public interface KeyValueStore extends AutoCloseable {
     /** Stores the value for at most {@code ttlSeconds}, positive. */
     void put(String key, byte[] value, long ttlSeconds);
 
+    /** Stores the value as {@link #put} does, unless the key already holds one. Atomic. */
+    void putIfAbsent(String key, byte[] value, long ttlSeconds);
+
     /** Removes the entry, if any. */
     void remove(String key);
 
@@ -46,6 +49,12 @@ public interface KeyValueStore extends AutoCloseable {
 
     /** Removes every entry, including entries other nodes wrote. */
     void clear();
+
+    /**
+     * Told whether the cache now considers this store reachable, when that changes. Calls may repeat a value but never
+     * overlap, and the last one carries the current state. Must return quickly. Does nothing by default.
+     */
+    default void reachable(boolean reachable) {}
 
     /**
      * Releases what this store owns. Entries are left in place, and a connection shared with other callers outlives the

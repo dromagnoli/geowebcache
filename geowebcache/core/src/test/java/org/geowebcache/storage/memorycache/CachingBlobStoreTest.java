@@ -11,7 +11,7 @@
  *
  * <p>Copyright 2026
  */
-package org.geowebcache.storage.tilecache;
+package org.geowebcache.storage.memorycache;
 
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.awaitility.Awaitility.await;
@@ -24,6 +24,7 @@ import static org.geowebcache.util.TMSKeyBuilder.PARAMETERS_METADATA_OBJECT_SUFF
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.allOf;
 import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.hasEntry;
@@ -60,7 +61,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Predicate;
 import java.util.logging.Level;
-import org.geowebcache.MockExtensionRule;
 import org.geowebcache.config.ServerConfiguration;
 import org.geowebcache.filter.parameters.ParametersUtils;
 import org.geowebcache.io.ByteArrayResource;
@@ -99,13 +99,10 @@ public class CachingBlobStoreTest {
     public TemporaryFolder temp = new TemporaryFolder();
 
     @Rule
-    public MockExtensionRule extensions = new MockExtensionRule();
-
-    @Rule
     public LogLines log = new LogLines(CachingBlobStore.class, Level.FINE);
 
     @Rule
-    public LogLines stateLog = new LogLines(TileCache.class, Level.INFO);
+    public LogLines stateLog = new LogLines(GuardedStore.class, Level.INFO);
 
     private final AtomicLong now = new AtomicLong();
 
@@ -126,12 +123,12 @@ public class CachingBlobStoreTest {
     private String blobStoreId;
 
     // volatile: the concurrency tests replace the settings while other threads read them
-    private volatile TileCacheInfo tileCacheInfo;
+    private volatile MemoryCacheInfo memoryCacheInfo;
 
     private final ExecutorService executor = Executors.newCachedThreadPool();
 
     /** Built by {@link #newCache}, closed after the test. */
-    private final List<TileCache> caches = new ArrayList<>();
+    private final List<MemoryCache> caches = new ArrayList<>();
 
     private TileLayer layer;
 
@@ -160,11 +157,10 @@ public class CachingBlobStoreTest {
         BlobStoreAggregator aggregator = createNiceMock(BlobStoreAggregator.class);
         expect(aggregator.getBlobStores()).andStubReturn(List.of());
         ServerConfiguration serverConfig = createNiceMock(ServerConfiguration.class);
-        expect(serverConfig.getTileCache()).andStubAnswer(() -> tileCacheInfo);
+        expect(serverConfig.getMemoryCache()).andStubAnswer(() -> memoryCacheInfo);
         replay(layer, renamed, layers, storageFinder, aggregator, serverConfig);
 
         store = new CompositeBlobStore(layers, storageFinder, serverConfig, aggregator);
-        extensions.addBean("testTileCacheBackend", new TestBackend(), TileCacheBackend.class);
         // tests writing to the store alone first set the settings to null
         enableCache(false);
     }
@@ -172,7 +168,7 @@ public class CachingBlobStoreTest {
     @After
     public void tearDown() {
         executor.shutdownNow();
-        caches.forEach(TileCache::close);
+        caches.forEach(MemoryCache::close);
     }
 
     @Test
@@ -190,13 +186,13 @@ public class CachingBlobStoreTest {
 
     @Test
     public void testPassthroughOnWritesAndReadsThroughStore() throws Exception {
-        tileCacheInfo = null;
+        memoryCacheInfo = null;
         store.put(tile(0, 0, 0));
         enableCache(true);
         assertTrue(store.get(tile(0, 0, 0)));
 
         // remove from the store only, the cache still has it
-        tileCacheInfo = null;
+        memoryCacheInfo = null;
         store.delete(tile(0, 0, 0));
         enableCache(true);
         assertTrue(store.get(tile(0, 0, 0)));
@@ -207,7 +203,7 @@ public class CachingBlobStoreTest {
 
     @Test
     public void testNoReadThroughWithPassthroughOff() throws Exception {
-        tileCacheInfo = null;
+        memoryCacheInfo = null;
         store.put(tile(0, 0, 0));
         enableCache(false);
 
@@ -224,7 +220,7 @@ public class CachingBlobStoreTest {
 
         now.set(SECONDS.toNanos(10));
         assertFalse(store.get(tile(0, 0, 0)));
-        now.set(SECONDS.toNanos(tileCacheInfo.getTimeToLive() + 1));
+        now.set(SECONDS.toNanos(memoryCacheInfo.getTimeToLive() + 1));
         assertTrue(store.get(tile(1, 0, 1)));
         now.set(SECONDS.toNanos(3600));
         assertFalse(store.get(tile(1, 0, 1)));
@@ -343,7 +339,7 @@ public class CachingBlobStoreTest {
 
     @Test
     public void testReadResultsLogged() throws Exception {
-        tileCacheInfo = null;
+        memoryCacheInfo = null;
         store.put(tile(0, 0, 0));
         enableCache(true);
         expireCache = 10;
@@ -367,7 +363,7 @@ public class CachingBlobStoreTest {
 
     @Test
     public void testReadThroughKeepsOnlyRemainingLifetime() throws Exception {
-        tileCacheInfo = null;
+        memoryCacheInfo = null;
         long millis = System.currentTimeMillis();
         TileObject old = tile(0, 0, 0);
         old.setCreated(millis - 60_000);
@@ -450,7 +446,7 @@ public class CachingBlobStoreTest {
     public void testMappingWrittenToNewStore() throws Exception {
         MappingCountingStore previous = new MappingCountingStore();
         MappingCountingStore moved = new MappingCountingStore();
-        try (TileCache cache = new TileCache(tileCacheInfo, layers, ticker)) {
+        try (MemoryCache cache = new MemoryCache(memoryCacheInfo, layers, ticker)) {
             cache.wrap(layer, previous).put(tile(0, 0, 0));
             cache.wrap(layer, previous).put(tile(1, 0, 1));
 
@@ -467,8 +463,8 @@ public class CachingBlobStoreTest {
     public void testTruncateOnOtherNodeRewritesMapping() throws Exception {
         MappingCountingStore shared = new MappingCountingStore();
         // two nodes, sharing the cache and the blob store
-        try (TileCache node = new TileCache(tileCacheInfo, layers, ticker);
-                TileCache other = new TileCache(tileCacheInfo, layers, ticker)) {
+        try (MemoryCache node = new MemoryCache(memoryCacheInfo, layers, ticker);
+                MemoryCache other = new MemoryCache(memoryCacheInfo, layers, ticker)) {
             node.wrap(layer, shared).put(tile(0, 0, 0));
 
             other.wrap(layer, shared).deleteByParametersId(LAYER, ParametersUtils.getId(STYLE_A));
@@ -481,45 +477,71 @@ public class CachingBlobStoreTest {
     }
 
     @Test
-    public void testFailedTruncateClearsCacheAndThrows() throws Exception {
+    public void testFailedRemovalLeavesStoreUntouched() throws Exception {
+        enableCache(true);
         store.put(tile(0, 0, 0));
         store.put(tile(OTHER_GRIDSET, STYLE_A, 0, 0, 0));
         kv.failRemovals = true;
 
-        assertThrows(StorageException.class, () -> store.deleteByGridsetId(LAYER, GRIDSET));
+        StorageException e = assertThrows(StorageException.class, () -> store.deleteByGridsetId(LAYER, GRIDSET));
 
-        // the clear after the failure removed tiles the truncate was not about
-        assertNull(kv.get(key(tile(OTHER_GRIDSET, STYLE_A, 0, 0, 0))));
+        assertThat(e.getMessage(), containsString("not run, retry once it recovers"));
+        // nothing cleared in the cache, nothing truncated in the store
+        assertNotNull(kv.get(key(tile(OTHER_GRIDSET, STYLE_A, 0, 0, 0))));
+        assertTrue(inStore(tile(0, 0, 0)));
     }
 
     @Test
-    public void testFailedRangeTruncateRemovesLayerOnly() throws Exception {
-        store.put(tile(1, 1, 1));
-        kv.put("other-layer/" + GRIDSET + "/png/default/1/0/0.png", new byte[] {1}, 300);
-        kv.failMatching = true;
+    public void testTruncateRefusedWhileDown() throws Exception {
+        enableCache(true);
+        MappingCountingStore delegate = new MappingCountingStore();
+        BlobStore cached = newCache().wrap(layer, delegate);
+        cached.put(tile(0, 0, 0));
+        kv.failing = true;
+        cached.get(tile(0, 0, 0));
+        int calls = kv.calls.get();
 
-        assertThrows(StorageException.class, () -> store.delete(range()));
+        assertThrows(StorageException.class, () -> cached.delete(range()));
 
-        // outside the range but in the layer, removed; another layer kept, the cache was not cleared
-        assertNull(kv.get(key(tile(1, 1, 1))));
-        assertNotNull(kv.get("other-layer/" + GRIDSET + "/png/default/1/0/0.png"));
+        // refused before the cache and the store
+        assertEquals(calls, kv.calls.get());
+        assertTrue(delegate.get(tile(0, 0, 0)));
     }
 
     @Test
-    public void testFailedTruncateStillTruncatesStore() throws Exception {
+    public void testFailedLayerRemovalStillDeletesStore() throws Exception {
         enableCache(true);
         store.put(tile(0, 0, 0));
         kv.failing = true;
 
+        // a removed layer cannot be truncated again, so its store goes anyway
         assertThrows(StorageException.class, () -> store.delete(LAYER));
 
         assertFalse(inStore(tile(0, 0, 0)));
     }
 
     @Test
+    public void testRemovalFailingAfterStoreTruncateThrows() throws Exception {
+        enableCache(true);
+        PausingStore delegate = new PausingStore();
+        BlobStore cached = newCache().wrap(layer, delegate);
+        cached.put(tile(0, 0, 0));
+        String otherLayer = "other-layer/" + GRIDSET + "/png/default/1/0/0.png";
+        kv.put(otherLayer, new byte[] {1}, 300);
+        delegate.onTruncate = () -> kv.failRemovals = true;
+
+        StorageException e = assertThrows(StorageException.class, () -> cached.delete(LAYER));
+
+        assertThat(e.getMessage(), containsString("may be stale until they expire"));
+        // no clear of the whole cache after the failure
+        kv.failRemovals = false;
+        assertNotNull(kv.get(otherLayer));
+    }
+
+    @Test
     public void testDisabledCacheLeavesTilesToStore() throws Exception {
-        tileCacheInfo = settings(new TestSettings(), true);
-        tileCacheInfo.setEnabled(false);
+        memoryCacheInfo = settings(new TestSettings(), true);
+        memoryCacheInfo.setEnabled(false);
         store.put(tile(0, 0, 0));
 
         enableCache(false);
@@ -568,7 +590,7 @@ public class CachingBlobStoreTest {
         store.put(tile(0, 0, 0));
 
         // as a configuration reload with unchanged settings
-        tileCacheInfo = settings(tileCacheInfo.getBackend(), false);
+        memoryCacheInfo = settings(memoryCacheInfo.getBackend(), false);
         store.get(tile(0, 0, 0));
         assertFalse(kv.closed);
 
@@ -579,14 +601,24 @@ public class CachingBlobStoreTest {
 
     @Test
     public void testUninstalledBackendDropsTiles() throws Exception {
-        UnresolvedTileCacheBackendInfo removed = new UnresolvedTileCacheBackendInfo("removedTileCache", "<backend/>");
-        tileCacheInfo = settings(removed, false);
+        UnresolvedKeyValueStoreInfo removed = new UnresolvedKeyValueStoreInfo("removedTileCache", "<backend/>");
+        memoryCacheInfo = settings(removed, false);
 
         store.put(tile(0, 0, 0));
 
         assertFalse(store.get(tile(0, 0, 0)));
         assertFalse(inStore(tile(0, 0, 0)));
         assertThat(stateLog.lines, hasItem("In-memory tile cache unusable, backend removedTileCache is not installed"));
+    }
+
+    @Test
+    public void testUnusableCacheStillTruncatesStore() throws Exception {
+        memoryCacheInfo = settings(new UnresolvedKeyValueStoreInfo("removedTileCache", "<backend/>"), true);
+        store.put(tile(0, 0, 0));
+
+        // the cache never held a tile, a failure there would fail every truncate until the settings change
+        assertTrue(store.deleteByGridsetId(LAYER, GRIDSET));
+        assertFalse(inStore(tile(0, 0, 0)));
     }
 
     @Test
@@ -598,24 +630,12 @@ public class CachingBlobStoreTest {
 
         assertFalse(store.get(tile(0, 0, 0)));
         assertFalse(inStore(tile(0, 0, 0)));
-        assertThat(stateLog.lines, hasItem("In-memory tile cache unusable, could not create backend test"));
-    }
-
-    @Test
-    public void testMissingBackendDropsTiles() throws Exception {
-        // the heap backend bean is not registered in this test
-        tileCacheInfo = settings(new HeapTileCacheBackendInfo(), false);
-
-        store.put(tile(0, 0, 0));
-
-        // passthrough off still keeps tiles out of the store
-        assertFalse(store.get(tile(0, 0, 0)));
-        assertFalse(inStore(tile(0, 0, 0)));
+        assertThat(stateLog.lines, hasItem("In-memory tile cache unusable, could not create backend TestSettings"));
     }
 
     @Test
     public void testInvalidTimeToLiveDropsTiles() throws Exception {
-        tileCacheInfo.setTimeToLive(-1);
+        memoryCacheInfo.setTimeToLive(-1);
 
         store.put(tile(0, 0, 0));
 
@@ -697,6 +717,8 @@ public class CachingBlobStoreTest {
     @Test
     public void testReadThroughAfterTruncateExpires() throws Exception {
         enableCache(true);
+        // longer than the time to live, which still bounds a tile read through
+        expireCache = 3600;
         PausingStore delegate = new PausingStore();
         BlobStore cached = newCache().wrap(layer, delegate);
         delegate.put(tile(0, 0, 0));
@@ -710,8 +732,28 @@ public class CachingBlobStoreTest {
         // the known window: a read of the store before its truncate, caching after the last removal, leaves a stale
         // tile, served no longer than the time to live
         assertNotNull(kv.get(key(tile(0, 0, 0))));
-        now.set(SECONDS.toNanos(tileCacheInfo.getTimeToLive() + 1));
+        now.set(SECONDS.toNanos(memoryCacheInfo.getTimeToLive() + 1));
         assertNull(kv.get(key(tile(0, 0, 0))));
+    }
+
+    @Test
+    public void testReadThroughKeepsNewerPut() throws Exception {
+        enableCache(true);
+        PausingStore delegate = new PausingStore();
+        BlobStore cached = newCache().wrap(layer, delegate);
+        delegate.put(tile(0, 0, 0));
+        Future<Boolean> read = executor.submit(() -> cached.get(tile(0, 0, 0)));
+        assertTrue(delegate.paused.await(10, SECONDS));
+
+        TileObject newer = tile(0, 0, 0);
+        newer.setBlob(new ByteArrayResource(new byte[] {4, 5, 6}));
+        cached.put(newer);
+        delegate.resume.countDown();
+        assertTrue(read.get(10, SECONDS));
+
+        TileObject served = tile(0, 0, 0);
+        assertTrue(cached.get(served));
+        assertArrayEquals(new byte[] {4, 5, 6}, ((ByteArrayResource) served.getBlob()).getContents());
     }
 
     @Test
@@ -774,8 +816,8 @@ public class CachingBlobStoreTest {
     }
 
     /** A cache with state of its own, as on another node, sharing {@link #kv}. */
-    private TileCache newCache() {
-        TileCache cache = new TileCache(tileCacheInfo, layers, ticker);
+    private MemoryCache newCache() {
+        MemoryCache cache = new MemoryCache(memoryCacheInfo, layers, ticker);
         caches.add(cache);
         return cache;
     }
@@ -787,11 +829,11 @@ public class CachingBlobStoreTest {
     }
 
     private void enableCache(boolean passthrough) {
-        tileCacheInfo = settings(new TestSettings(), passthrough);
+        memoryCacheInfo = settings(new TestSettings(), passthrough);
     }
 
-    private static TileCacheInfo settings(TileCacheBackendInfo backend, boolean passthrough) {
-        TileCacheInfo info = new TileCacheInfo();
+    private static MemoryCacheInfo settings(KeyValueStoreInfo backend, boolean passthrough) {
+        MemoryCacheInfo info = new MemoryCacheInfo();
         info.setEnabled(true);
         info.setPassthrough(passthrough);
         info.setBackend(backend);
@@ -799,7 +841,7 @@ public class CachingBlobStoreTest {
     }
 
     private boolean inStore(TileObject tile) throws StorageException {
-        tileCacheInfo = null;
+        memoryCacheInfo = null;
         return store.get(tile);
     }
 
@@ -847,8 +889,6 @@ public class CachingBlobStoreTest {
 
         volatile boolean failRemovals;
 
-        volatile boolean failMatching;
-
         /** How long a failing call waits before it throws. */
         volatile long hangMillis;
 
@@ -880,6 +920,12 @@ public class CachingBlobStoreTest {
         }
 
         @Override
+        public void putIfAbsent(String key, byte[] value, long ttlSeconds) {
+            check(false);
+            delegate.putIfAbsent(key, value, ttlSeconds);
+        }
+
+        @Override
         public void remove(String key) {
             check(true);
             delegate.remove(key);
@@ -894,7 +940,6 @@ public class CachingBlobStoreTest {
         @Override
         public void removeMatching(String prefix, Predicate<String> filter) {
             check(true);
-            if (failMatching) throw new IllegalStateException("Simulated matching removal failure");
             delegate.removeMatching(prefix, filter);
         }
 
@@ -989,26 +1034,14 @@ public class CachingBlobStoreTest {
         }
     }
 
-    /** Thrown by {@link TestBackend#createStore} when set. */
+    /** Thrown by {@link TestSettings#createStore} when set. */
     private Error backendError;
 
-    private static class TestSettings implements TileCacheBackendInfo {}
-
-    /** Hands the shared {@link FailingStore} to every cache built from {@link TestSettings}. */
-    private class TestBackend implements TileCacheBackend {
+    /** Hands the shared {@link FailingStore} to every cache built from these settings. */
+    private class TestSettings implements KeyValueStoreInfo {
 
         @Override
-        public String getId() {
-            return "test";
-        }
-
-        @Override
-        public Class<TestSettings> getSettingsClass() {
-            return TestSettings.class;
-        }
-
-        @Override
-        public KeyValueStore createStore(TileCacheBackendInfo info) {
+        public KeyValueStore createStore() {
             if (backendError != null) throw backendError;
             return kv;
         }

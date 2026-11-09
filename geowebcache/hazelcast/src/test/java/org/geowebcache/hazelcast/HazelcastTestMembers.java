@@ -77,8 +77,8 @@ final class HazelcastTestMembers {
     }
 
     /** Client settings reaching the members at {@code ports}. */
-    static HazelcastClientTileCacheBackendInfo clientSettings(int... ports) {
-        HazelcastClientTileCacheBackendInfo settings = new HazelcastClientTileCacheBackendInfo();
+    static HazelcastClientKeyValueStoreInfo clientSettings(int... ports) {
+        HazelcastClientKeyValueStoreInfo settings = new HazelcastClientKeyValueStoreInfo();
         settings.setClusterName(CLUSTER);
         settings.setMembers(IntStream.of(ports).mapToObj(p -> "127.0.0.1:" + p).collect(joining(",")));
         return settings;

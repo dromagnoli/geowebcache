@@ -15,10 +15,12 @@ package org.geowebcache.hazelcast;
 
 import java.io.Serial;
 import java.util.Objects;
-import org.geowebcache.storage.tilecache.TileCacheBackendInfo;
+import org.geowebcache.GeoWebCacheExtensions;
+import org.geowebcache.storage.memorycache.KeyValueStore;
+import org.geowebcache.storage.memorycache.KeyValueStoreInfo;
 
-/** Settings of the {@link HazelcastClientTileCacheBackend}; an absent element reads as its default. */
-public class HazelcastClientTileCacheBackendInfo implements TileCacheBackendInfo {
+/** Settings of a store in a Hazelcast cluster reached as a client; an absent element reads as its default. */
+public class HazelcastClientKeyValueStoreInfo implements KeyValueStoreInfo {
 
     @Serial
     private static final long serialVersionUID = 1L;
@@ -65,10 +67,24 @@ public class HazelcastClientTileCacheBackendInfo implements TileCacheBackendInfo
         this.mapName = mapName;
     }
 
+    /**
+     * Returns a store on the client shared by the application context, connecting first if needed.
+     *
+     * @throws IllegalStateException when the context has no {@link HazelcastClientConnection}
+     */
+    @Override
+    public KeyValueStore createStore() {
+        HazelcastClientConnection connection = GeoWebCacheExtensions.bean(HazelcastClientConnection.class);
+        if (connection == null) {
+            throw new IllegalStateException("No Hazelcast client connection in the application context");
+        }
+        return connection.createStore(this);
+    }
+
     /** Equal when the effective settings are, an absent value matching its default. */
     @Override
     public boolean equals(Object o) {
-        return o instanceof HazelcastClientTileCacheBackendInfo other
+        return o instanceof HazelcastClientKeyValueStoreInfo other
                 && getClusterName().equals(other.getClusterName())
                 && getMembers().equals(other.getMembers())
                 && getMapName().equals(other.getMapName());
